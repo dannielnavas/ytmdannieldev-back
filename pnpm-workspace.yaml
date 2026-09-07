@@ -1,0 +1,4 @@
+allowBuilds:
+  '@biomejs/biome': true
+  '@scarf/scarf': true
+  bcrypt: true
