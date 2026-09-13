@@ -102,4 +102,13 @@ export class UsersService {
     }
     return user.youtube_cookies;
   }
+
+  async findFirstYoutubeCookie(): Promise<string | null> {
+    const user = await this.userRepo
+      .createQueryBuilder('user')
+      .where('user.youtube_cookies IS NOT NULL')
+      .orderBy('user.youtube_connected_at', 'DESC')
+      .getOne();
+    return user?.youtube_cookies || null;
+  }
 }

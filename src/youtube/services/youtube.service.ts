@@ -106,17 +106,60 @@ export class YoutubeService implements OnModuleInit {
 
   async getAudioStream(videoId: string): Promise<Misc.Format> {
     const cleanId = videoId.replace(/^RDAM(?:VM|PL)/, '');
+
+    // 1. Intentar con cookies del usuario (YTMUSIC) para evitar bloqueos por IP de datacenter en Vercel
+    try {
+      const rawCookie = await this.usersService.findFirstYoutubeCookie();
+      if (rawCookie) {
+        const cleanCookie = rawCookie.replace(/(\r\n|\n|\r)/gm, '').trim();
+        const authedYt = await Innertube.create({
+          cache: new UniversalCache(false),
+          cookie: cleanCookie,
+          location: 'CO',
+          lang: 'es',
+        });
+        const info = await authedYt.getBasicInfo(cleanId, {
+          client: 'YTMUSIC',
+        } as any);
+        if (info.streaming_data) {
+          let format = info.chooseFormat({ type: 'audio', quality: 'best' });
+          if (!format) {
+            const audioFormats = (
+              info.streaming_data?.adaptive_formats || []
+            ).filter((f) => f.mime_type?.includes('audio'));
+            if (audioFormats.length > 0) {
+              format = audioFormats[0];
+            }
+          }
+          if (format) {
+            this.yt = authedYt;
+            return format;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Fallo stream autenticado con YTMUSIC:', err);
+    }
+
+    // 2. Fallback sin cookies utilizando clientes móviles
+    if (!this.yt) {
+      this.yt = await Innertube.create({
+        cache: new UniversalCache(false),
+        location: 'CO',
+        lang: 'es',
+      });
+    }
+
     const clients: (string | undefined)[] = [
       'IOS',
       'ANDROID',
-      'YTMUSIC',
       'TV_EMBEDDED',
       'WEB_EMBEDDED',
       undefined,
       'VISIONOS',
     ];
 
-    let lastError: any = null;
+    const errors: Record<string, string> = {};
     for (const client of clients) {
       try {
         const opts: any = client ? { client } : {};
@@ -133,15 +176,20 @@ export class YoutubeService implements OnModuleInit {
           }
           if (format) {
             return format;
+          } else {
+            errors[client || 'default'] =
+              'streaming_data present but no audio format found';
           }
+        } else {
+          errors[client || 'default'] = 'no streaming_data';
         }
-      } catch (err) {
-        lastError = err;
+      } catch (err: any) {
+        errors[client || 'default'] = err?.message || String(err);
       }
     }
 
     throw new InternalServerErrorException(
-      `No audio stream found for video ${cleanId}: ${lastError?.message || 'Streaming data not available'}`,
+      `No audio stream found for video ${cleanId}: ${JSON.stringify(errors)}`,
     );
   }
 
