@@ -4,11 +4,11 @@ import { ClassSerializerInterceptor, ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { join } from 'path';
+import { existsSync } from 'fs';
 
-async function bootstrap() {
-  // const app = await NestFactory.create(AppModule, {
-  //   instrument: ObserveInstrument,
-  // });
+let server: ((req: any, res: any) => void) | null = null;
+
+export async function createNestServer(): Promise<NestExpressApplication> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   // Lista de orígenes permitidos
@@ -72,13 +72,16 @@ async function bootstrap() {
       'Content-Type, Authorization, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-API-Key, Cache-Control, Pragma',
     );
     res.header('Access-Control-Max-Age', '86400');
-    res.header('Access-Control-Expose-Headers', [
-      'Authorization',
-      'X-Total-Count',
-      'Accept-Ranges',
-      'Content-Range',
-      'Content-Length',
-    ].join(', '));
+    res.header(
+      'Access-Control-Expose-Headers',
+      [
+        'Authorization',
+        'X-Total-Count',
+        'Accept-Ranges',
+        'Content-Range',
+        'Content-Length',
+      ].join(', '),
+    );
 
     // Manejar peticiones OPTIONS (preflight)
     if (req.method === 'OPTIONS') {
@@ -103,13 +106,18 @@ async function bootstrap() {
 
   app.useGlobalInterceptors(new ClassSerializerInterceptor(app.get(Reflector)));
 
-  // Configurar archivos estáticos para Swagger UI
-  app.useStaticAssets(
-    join(import.meta.dirname, '..', 'node_modules', 'swagger-ui-dist'),
-    {
-      prefix: '/docs/',
-    },
+  // Configurar archivos estáticos para Swagger UI si existen localmente
+  const swaggerDistPath = join(
+    import.meta.dirname,
+    '..',
+    'node_modules',
+    'swagger-ui-dist',
   );
+  if (existsSync(swaggerDistPath)) {
+    app.useStaticAssets(swaggerDistPath, {
+      prefix: '/docs/',
+    });
+  }
 
   const config = new DocumentBuilder()
     .setTitle('API')
@@ -129,6 +137,32 @@ async function bootstrap() {
     ],
   });
 
+  return app;
+}
+
+// Handler para Vercel Serverless Functions
+export default async function handler(req: any, res: any) {
+  try {
+    if (!server) {
+      const app = await createNestServer();
+      await app.init();
+      server = app.getHttpAdapter().getInstance();
+    }
+    return server(req, res);
+  } catch (error) {
+    console.error('Error in Vercel Serverless handler bootstrap:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        statusCode: 500,
+        message: 'Serverless Function Bootstrap Failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+// Ejecución local (Nest watch, dev, standalone node)
+if (!process.env.VERCEL) {
+  const app = await createNestServer();
   await app.listen(process.env.PORT ?? 3000);
 }
-await bootstrap();
