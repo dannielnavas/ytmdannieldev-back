@@ -1,5 +1,4 @@
-import { Controller, Get, Param, Query, Res } from '@nestjs/common';
-import type { Response } from 'express';
+import { Controller, Get, Param, Query, Redirect } from '@nestjs/common';
 import { Public } from './auth/decorators/public.decorator.js';
 import { AppService } from './app.service.js';
 
@@ -14,18 +13,25 @@ export class AppController {
 
   @Public()
   @Get('stream/:id')
-  streamParamRedirect(@Param('id') id: string, @Res() res: Response) {
-    res.redirect(307, `/youtube/stream/${encodeURIComponent(id)}`);
+  @Redirect()
+  streamParamRedirect(@Param('id') id: string) {
+    return {
+      url: `/youtube/stream/${encodeURIComponent(id)}`,
+      statusCode: 307,
+    };
   }
 
   @Public()
   @Get('stream')
+  @Redirect()
   streamQueryRedirect(
     @Query('videoId') videoId: string,
     @Query('id') queryId: string,
-    @Res() res: Response,
   ) {
     const id = videoId || queryId;
-    res.redirect(307, `/youtube/stream?videoId=${encodeURIComponent(id || '')}`);
+    return {
+      url: `/youtube/stream?videoId=${encodeURIComponent(id || '')}`,
+      statusCode: 307,
+    };
   }
 }

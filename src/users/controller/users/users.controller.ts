@@ -25,7 +25,7 @@ export class UsersController {
 
   @Get('me')
   getMeData(@Req() req: Request) {
-    const userPayload = req.user as Token;
+    const userPayload = (req as any).user as Token;
     return this.usersService.findById(userPayload.sub);
   }
 }

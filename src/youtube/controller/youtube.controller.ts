@@ -8,7 +8,7 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
-import type { Request, Response } from 'express';
+import type { Request } from 'express';
 import { Readable } from 'node:stream';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth/jwt-auth.guard.js';
 import { Public } from '../../auth/decorators/public.decorator.js';
@@ -24,7 +24,7 @@ export class YoutubeController {
 
   @Get('dashboard')
   getDashboardData(@Req() req: Request) {
-    const userPayload = req.user as Token;
+    const userPayload = (req as any).user as Token;
 
     return this.youtubeService.getDashboardData(userPayload.sub);
   }
@@ -35,7 +35,7 @@ export class YoutubeController {
     @Query('videoId') videoId: string,
     @Query('id') queryId: string,
     @Req() req: Request,
-    @Res() res: Response,
+    @Res() res: any,
   ) {
     const id = (videoId || queryId)?.replace(/^RDAM(?:VM|PL)/, '');
     if (!id) {
@@ -44,7 +44,7 @@ export class YoutubeController {
     }
 
     // Si el cliente solicita JSON (ej. HttpClient de Angular desde _dashboard.stream)
-    const acceptHeader = req.headers['accept'] || '';
+    const acceptHeader = (req.headers as any)?.['accept'] || '';
     if (acceptHeader.includes('application/json')) {
       res.json({
         videoId: id,
@@ -61,12 +61,12 @@ export class YoutubeController {
   async streamByParam(
     @Param('id') id: string,
     @Req() req: Request,
-    @Res() res: Response,
+    @Res() res: any,
   ) {
     return this.pipeAudioStream(id, req, res);
   }
 
-  private async pipeAudioStream(id: string, req: Request, res: Response) {
+  private async pipeAudioStream(id: string, req: Request, res: any) {
     try {
       const format = await this.youtubeService.getAudioStream(id);
       const url = await format.decipher(this.youtubeService.yt.session.player);
@@ -78,8 +78,8 @@ export class YoutubeController {
         referer: 'https://www.youtube.com',
         DNT: '?1',
       };
-      if (req.headers['range']) {
-        headers['Range'] = req.headers['range'] as string;
+      if ((req.headers as any)?.['range']) {
+        headers['Range'] = (req.headers as any)['range'] as string;
       }
 
       const upstream = await fetch(`${url}&cpn=${cpn}`, { headers });
