@@ -106,22 +106,43 @@ export class YoutubeService implements OnModuleInit {
 
   async getAudioStream(videoId: string): Promise<Misc.Format> {
     const cleanId = videoId.replace(/^RDAM(?:VM|PL)/, '');
-    const info = await this.yt.getInfo(cleanId, { client: 'VISIONOS' });
-    let format = info.chooseFormat({ type: 'audio', quality: 'best' });
-    if (!format) {
-      const audioFormats = (info.streaming_data?.adaptive_formats || []).filter(
-        (f) => f.mime_type?.includes('audio'),
-      );
-      if (audioFormats.length > 0) {
-        format = audioFormats[0];
+    const clients: (string | undefined)[] = [
+      'IOS',
+      'ANDROID',
+      'YTMUSIC',
+      'TV_EMBEDDED',
+      'WEB_EMBEDDED',
+      undefined,
+      'VISIONOS',
+    ];
+
+    let lastError: any = null;
+    for (const client of clients) {
+      try {
+        const opts: any = client ? { client } : {};
+        const info = await this.yt.getBasicInfo(cleanId, opts);
+        if (info.streaming_data) {
+          let format = info.chooseFormat({ type: 'audio', quality: 'best' });
+          if (!format) {
+            const audioFormats = (
+              info.streaming_data?.adaptive_formats || []
+            ).filter((f) => f.mime_type?.includes('audio'));
+            if (audioFormats.length > 0) {
+              format = audioFormats[0];
+            }
+          }
+          if (format) {
+            return format;
+          }
+        }
+      } catch (err) {
+        lastError = err;
       }
     }
-    if (!format) {
-      throw new InternalServerErrorException(
-        `No audio format available for video ${cleanId}`,
-      );
-    }
-    return format;
+
+    throw new InternalServerErrorException(
+      `No audio stream found for video ${cleanId}: ${lastError?.message || 'Streaming data not available'}`,
+    );
   }
 
   async getMetadata(videoId: string) {
