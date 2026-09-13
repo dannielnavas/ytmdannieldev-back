@@ -4,19 +4,18 @@ import {
   Body,
   Controller,
   Get,
+  Header,
+  Headers,
   Param,
   ParseIntPipe,
   Patch,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { UsersService } from '../../services/users/users.service.js';
-import {
-  ChangePasswordDto,
-  CreateUserDto,
-  UpdateUserDto,
-} from '../../dtos/user.dto.js';
-import { Public } from '../../../auth/decorators/public.decorator.js';
+import type { Request } from 'express';
+import { Token } from '../../../auth/models/token.model.js';
 
 @ApiTags('Users')
 @Controller('users')
@@ -24,34 +23,9 @@ import { Public } from '../../../auth/decorators/public.decorator.js';
 export class UsersController {
   constructor(private usersService: UsersService) {}
 
-  @Post()
-  @Public()
-  create(@Body() payload: CreateUserDto) {
-    return this.usersService.create(payload);
-  }
-
-  @Get(':id')
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.usersService.findOne(id);
-  }
-
-  @Patch(':id')
-  update(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() payload: UpdateUserDto,
-  ) {
-    return this.usersService.update(id, payload);
-  }
-
-  @Post(':id/change-password')
-  changePassword(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() payload: ChangePasswordDto,
-  ) {
-    return this.usersService.changePassword(
-      id,
-      payload.current_password,
-      payload.new_password,
-    );
+  @Get('me')
+  getMeData(@Req() req: Request) {
+    const userPayload = req.user as Token;
+    return this.usersService.findById(userPayload.sub);
   }
 }

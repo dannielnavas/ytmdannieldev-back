@@ -13,56 +13,84 @@ export class Users {
   @Column({
     type: 'varchar',
     length: 255,
-  })
-  email: string;
-  @Column({
-    type: 'varchar',
-    length: 255,
-  })
-  full_name: string;
-  @Column({
-    type: 'varchar',
-    length: 255,
-  })
-  profile_image: string;
-  @Column({
-    type: 'varchar',
-    length: 255,
-  })
-  role: string;
-  @Column({
-    type: 'varchar',
-    length: 255,
-  })
-  password: string;
-  @Column({
-    type: 'boolean',
-    default: false,
-  })
-  accept_terms?: boolean;
-  @Column({
-    type: 'jsonb',
     nullable: true,
-    default: {
-      email_notifications: true,
-      dark_mode: true,
-      task_reminders: true,
-    },
   })
-  preferences?: Record<string, any>;
+  email?: string | null;
 
   @Column({
     type: 'varchar',
     length: 255,
     nullable: true,
   })
-  stripe_customer_id?: string;
+  full_name?: string | null;
+
+  @Column({
+    type: 'text',
+    nullable: true,
+  })
+  profile_image?: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 255,
+    default: 'user',
+  })
+  role: string;
+
+  // --- Datos extraídos y sesión de YouTube ---
+  @Column({
+    type: 'text',
+    nullable: true,
+  })
+  youtube_cookies?: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  youtube_channel_id?: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  youtube_channel_title?: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  youtube_handle?: string | null;
+
+  @Column({
+    type: 'boolean',
+    default: false,
+    nullable: true,
+  })
+  is_youtube_premium?: boolean;
+
+  @Column({
+    type: 'jsonb',
+    nullable: true,
+  })
+  youtube_data?: Record<string, any> | null;
+
+  @Column({
+    type: 'timestamptz',
+    nullable: true,
+  })
+  youtube_connected_at?: Date | null;
+
   @CreateDateColumn({
     type: 'timestamptz',
     default: () => 'CURRENT_TIMESTAMP',
     name: 'create_at',
   })
   created_at: Date;
+
   @UpdateDateColumn({
     type: 'timestamptz',
     default: () => 'CURRENT_TIMESTAMP',

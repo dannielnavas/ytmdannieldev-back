@@ -40,7 +40,13 @@ async function bootstrap() {
       'Cache-Control',
       'Pragma',
     ],
-    exposedHeaders: ['Authorization', 'X-Total-Count'],
+    exposedHeaders: [
+      'Authorization',
+      'X-Total-Count',
+      'Accept-Ranges',
+      'Content-Range',
+      'Content-Length',
+    ],
     credentials: true, // Ahora puede ser true con orígenes específicos
     preflightContinue: false,
     optionsSuccessStatus: 204,
@@ -66,6 +72,13 @@ async function bootstrap() {
       'Content-Type, Authorization, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-API-Key, Cache-Control, Pragma',
     );
     res.header('Access-Control-Max-Age', '86400');
+    res.header('Access-Control-Expose-Headers', [
+      'Authorization',
+      'X-Total-Count',
+      'Accept-Ranges',
+      'Content-Range',
+      'Content-Length',
+    ].join(', '));
 
     // Manejar peticiones OPTIONS (preflight)
     if (req.method === 'OPTIONS') {

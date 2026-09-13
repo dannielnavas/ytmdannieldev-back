@@ -4,85 +4,139 @@ import {
   IsBoolean,
   IsEmail,
   IsNotEmpty,
-  IsNumber,
   IsObject,
   IsOptional,
   IsString,
-  Length,
 } from 'class-validator';
 
 export class CreateUserDto {
   @IsString()
   @IsEmail()
-  @ApiProperty({ description: 'The email of the User.' })
-  readonly email: string;
-
-  @IsString()
-  @IsNotEmpty()
-  @ApiProperty({ description: 'The full name of the User.' })
-  readonly full_name: string;
+  @IsOptional()
+  @ApiProperty({ description: 'The email of the User.', required: false })
+  readonly email?: string;
 
   @IsString()
   @IsOptional()
-  @ApiProperty({ description: 'The profile image of the User.' })
-  readonly profile_image: string;
-
-  @IsNotEmpty()
-  @IsOptional()
-  @ApiProperty({ description: 'The role of the User.' })
-  readonly role: string;
+  @ApiProperty({ description: 'The full name of the User.', required: false })
+  readonly full_name?: string;
 
   @IsString()
-  @IsNotEmpty()
-  @Length(6)
-  @ApiProperty({ description: 'The password of the User.' })
-  readonly password: string;
-
-  @IsNumber()
   @IsOptional()
   @ApiProperty({
-    description: 'The subscription plan id of the User.',
+    description: 'The profile image of the User.',
     required: false,
   })
-  readonly subscription_plan_id?: number;
+  readonly profile_image?: string;
+
+  @IsString()
+  @IsOptional()
+  @ApiProperty({
+    description:
+      'YouTube session cookies (e.g. HSID, SSID, APISID, SAPISID, etc.)',
+    required: false,
+  })
+  readonly youtube_cookies?: string;
+
+  @IsString()
+  @IsOptional()
+  @ApiProperty({
+    description: 'YouTube Channel ID',
+    required: false,
+  })
+  readonly youtube_channel_id?: string;
+
+  @IsString()
+  @IsOptional()
+  @ApiProperty({
+    description: 'YouTube Handle (e.g. @username)',
+    required: false,
+  })
+  readonly youtube_handle?: string;
 
   @IsBoolean()
-  @IsNotEmpty()
+  @IsOptional()
   @ApiProperty({
-    description: 'Accept the terms and conditions of the User.',
+    description: 'Indicates if user has YouTube Music Premium',
     required: false,
   })
-  readonly accept_terms?: boolean;
+  readonly is_youtube_premium?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  @ApiProperty({
+    description: 'Indicates if user is authenticated with YouTube',
+    required: false,
+  })
+  readonly is_authenticated?: boolean;
 
   @IsObject()
   @IsOptional()
   @ApiProperty({
-    description: 'Preferences of the user (e.g. notifications, dark mode)',
+    description: 'Extra YouTube account and session metadata',
     required: false,
   })
-  readonly preferences?: Record<string, any>;
-
-  @IsString()
-  @IsOptional()
-  @ApiProperty({
-    description: 'Stripe Customer ID associated with this user',
-    required: false,
-  })
-  readonly stripe_customer_id?: string;
+  readonly youtube_data?: Record<string, any>;
 }
 
 export class UpdateUserDto extends PartialType(CreateUserDto) {}
 
-export class ChangePasswordDto {
+export class UpdateYoutubeCookiesDto {
   @IsString()
   @IsNotEmpty()
-  @Length(6)
-  @ApiProperty({ description: 'Current password' })
-  readonly current_password: string;
+  @ApiProperty({
+    description: 'YouTube session cookies string',
+    example: 'HSID=AkfmcdTOSacWt-vcP; SSID=Ade2HLHqJ4Do8qoEh; ...',
+  })
+  readonly youtube_cookies: string;
+}
+
+export class SyncYoutubeSessionDto {
+  @IsString()
+  @IsNotEmpty()
+  @ApiProperty({
+    description: 'YouTube session cookies string',
+    example: 'HSID=AkfmcdTOSacWt-vcP; SSID=Ade2HLHqJ4Do8qoEh; ...',
+  })
+  readonly youtube_cookies: string;
 
   @IsString()
-  @IsNotEmpty()
-  @Length(6)
-  @ApiProperty({ description: 'New password' })
-  readonly new_password: string;
+  @IsOptional()
+  @ApiProperty({
+    description: 'YouTube Channel ID',
+    required: false,
+  })
+  readonly youtube_channel_id?: string;
+
+  @IsString()
+  @IsOptional()
+  @ApiProperty({
+    description: 'YouTube Channel / User display name',
+    required: false,
+  })
+  readonly youtube_channel_title?: string;
+
+  @IsString()
+  @IsOptional()
+  @ApiProperty({
+    description: 'YouTube Handle',
+    required: false,
+  })
+  readonly youtube_handle?: string;
+
+  @IsBoolean()
+  @IsOptional()
+  @ApiProperty({
+    description: 'Is YouTube Music Premium user',
+    required: false,
+  })
+  readonly is_youtube_premium?: boolean;
+
+  @IsObject()
+  @IsOptional()
+  @ApiProperty({
+    description: 'Extra YouTube metadata (avatarUrl, account switcher, etc.)',
+    required: false,
+  })
+  readonly youtube_data?: Record<string, any>;
 }

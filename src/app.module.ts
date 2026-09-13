@@ -7,6 +7,9 @@ import config from './config.js';
 import { ConfigModule } from '@nestjs/config';
 import Joi from 'joi';
 import { DatabaseModule } from './database/database/database.module.js';
+import { AuthModule } from './auth/auth.module.js';
+import { UsersModule } from './users/users.module.js';
+import { YoutubeModule } from './youtube/youtube.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -36,6 +39,9 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
       }),
     }),
     DatabaseModule,
+    AuthModule,
+    UsersModule,
+    YoutubeModule,
   ],
   controllers: [AppController],
   providers: [AppService],

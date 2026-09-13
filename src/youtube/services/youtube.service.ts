@@ -1,0 +1,139 @@
+import {
+  BadGatewayException,
+  Injectable,
+  InternalServerErrorException,
+  OnModuleInit,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { UsersService } from '../../users/services/users/users.service.js';
+import YTMusic from 'ytmusic-api';
+
+import crypto from 'crypto';
+import { Cookie, CookieJar } from 'tough-cookie';
+import axios from 'axios';
+import type { AxiosInstance } from 'axios';
+import type { Readable } from 'stream';
+import { ClientType, Innertube, Misc, Platform } from 'youtubei.js';
+
+@Injectable()
+export class YoutubeService implements OnModuleInit {
+  private ytmusic = new YTMusic();
+  yt: Innertube;
+
+  async onModuleInit() {
+    Platform.shim.eval = async (data: any) => new Function(data.output)();
+    await this.ytmusic.initialize(); // solo una vez
+    this.yt = await Innertube.create();
+  }
+
+  constructor(private readonly usersService: UsersService) {}
+
+  async getDashboardData(userId: number) {
+    const rawCookies =
+      await this.usersService.findByIdReturnYoutubeCookie(userId);
+
+    if (!rawCookies) {
+      throw new UnauthorizedException('No cookies found for user');
+    }
+
+    const cleanCookies = rawCookies.replace(/(\r\n|\n|\r)/gm, '').trim();
+
+    try {
+      const ytmusic = new YTMusic();
+      await ytmusic.initialize({ GL: 'CO', HL: 'es' });
+
+      const session = ytmusic as unknown as {
+        cookiejar: CookieJar;
+        client: AxiosInstance;
+      };
+
+      // --- cookies en dominio correcto (music.youtube.com) ---
+      for (const cookieStr of cleanCookies.split('; ')) {
+        const cookie = Cookie.parse(cookieStr);
+        if (cookie) {
+          session.cookiejar.setCookieSync(cookie, 'https://music.youtube.com/');
+        }
+      }
+
+      // --- SAPISIDHASH ---
+      const sapisidMatch = cleanCookies.match(
+        /(?:SAPISID|__Secure-3PAPISID)=([^;]+)/,
+      );
+      const sapisid = sapisidMatch?.[1]?.trim();
+
+      const origin = 'https://music.youtube.com';
+
+      const getSapisidHash = (sapisid: string): string => {
+        const timestamp = Math.floor(Date.now() / 1000);
+        const sha1 = crypto.createHash('sha1');
+        sha1.update(`${timestamp} ${sapisid} ${origin}`);
+        return `${timestamp}_${sha1.digest('hex')}`;
+      };
+
+      // --- interceptor en axios: Authorization + headers de identidad ---
+      session.client.interceptors.request.use((req) => {
+        req.headers['cookie'] = cleanCookies;
+        req.headers['origin'] = origin;
+        req.headers['referer'] = `${origin}/`;
+        if (sapisid) {
+          req.headers['authorization'] =
+            `SAPISIDHASH ${getSapisidHash(sapisid)}`;
+          req.headers['x-origin'] = origin;
+          req.headers['x-goog-authuser'] = '0';
+        }
+        return req;
+      });
+
+      const playlists = await ytmusic.getHomeSections();
+      return playlists;
+    } catch (error) {
+      console.error('Error initializing YTMusic with cookies:', error);
+      throw new InternalServerErrorException(
+        'Could not fetch YouTube Music dashboard',
+      );
+    }
+  }
+
+  async search(query: string) {
+    const songs = await this.ytmusic.searchSongs(query); // title, artist, album, duration, thumbnail...
+    const playlists = await this.ytmusic.searchPlaylists(query);
+    const artists = await this.ytmusic.searchArtists(query);
+    const albums = await this.ytmusic.searchAlbums(query);
+    return { songs, playlists, artists, albums };
+  }
+
+  async getAudioStream(videoId: string): Promise<Misc.Format> {
+    const cleanId = videoId.replace(/^RDAM(?:VM|PL)/, '');
+    const info = await this.yt.getInfo(cleanId, { client: 'VISIONOS' });
+    const format = info.chooseFormat({ type: 'audio', quality: 'best' });
+    return format;
+  }
+
+  async getMetadata(videoId: string) {
+    const info = await this.yt.getInfo(videoId);
+
+    return {
+      title: info.basic_info.title,
+      duration: info.basic_info.duration, // en segundos (number)
+      thumbnail: info.basic_info.thumbnail?.[0]?.url,
+      channel: info.basic_info.channel?.name,
+      author: info.basic_info.author,
+      viewCount: info.basic_info.view_count,
+    };
+  }
+
+  async viewPlaylist(playlistId: string) {
+    const playListData = await this.ytmusic.getPlaylist(playlistId);
+    const songsOfThePlaylist = await this.ytmusic.getPlaylistVideos(
+      playListData.playlistId,
+    );
+    return {
+      infoPlaylist: playListData,
+      songsList: songsOfThePlaylist,
+    };
+  }
+
+  async viewAlbum(albumId: string) {
+    return this.ytmusic.getAlbum(albumId);
+  }
+}
