@@ -69,7 +69,9 @@ export class YoutubeController {
   private async pipeAudioStream(id: string, req: Request, res: any) {
     try {
       const format = await this.youtubeService.getAudioStream(id);
-      const url = await format.decipher(this.youtubeService.yt.session.player);
+      const url =
+        format.url ??
+        (await format.decipher(this.youtubeService.yt.session.player));
       const cpn = Utils.generateRandomString(16);
 
       const headers: Record<string, string> = {
@@ -111,7 +113,13 @@ export class YoutubeController {
       Readable.fromWeb(upstream.body as any).pipe(res);
     } catch (error) {
       console.error('Error streaming audio:', error);
-      res.status(500).send('Error streaming audio');
+      if (!res.headersSent) {
+        res.status(500).json({
+          statusCode: 500,
+          message: 'Error streaming audio',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 

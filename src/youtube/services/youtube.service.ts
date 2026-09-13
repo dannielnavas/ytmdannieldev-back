@@ -13,7 +13,7 @@ import { Cookie, CookieJar } from 'tough-cookie';
 import axios from 'axios';
 import type { AxiosInstance } from 'axios';
 import type { Readable } from 'stream';
-import { ClientType, Innertube, Misc, Platform } from 'youtubei.js';
+import { ClientType, Innertube, Misc, Platform, UniversalCache } from 'youtubei.js';
 
 @Injectable()
 export class YoutubeService implements OnModuleInit {
@@ -23,7 +23,9 @@ export class YoutubeService implements OnModuleInit {
   async onModuleInit() {
     Platform.shim.eval = async (data: any) => new Function(data.output)();
     await this.ytmusic.initialize(); // solo una vez
-    this.yt = await Innertube.create();
+    this.yt = await Innertube.create({
+      cache: new UniversalCache(false),
+    });
   }
 
   constructor(private readonly usersService: UsersService) {}
@@ -105,7 +107,20 @@ export class YoutubeService implements OnModuleInit {
   async getAudioStream(videoId: string): Promise<Misc.Format> {
     const cleanId = videoId.replace(/^RDAM(?:VM|PL)/, '');
     const info = await this.yt.getInfo(cleanId, { client: 'VISIONOS' });
-    const format = info.chooseFormat({ type: 'audio', quality: 'best' });
+    let format = info.chooseFormat({ type: 'audio', quality: 'best' });
+    if (!format) {
+      const audioFormats = (info.streaming_data?.adaptive_formats || []).filter(
+        (f) => f.mime_type?.includes('audio'),
+      );
+      if (audioFormats.length > 0) {
+        format = audioFormats[0];
+      }
+    }
+    if (!format) {
+      throw new InternalServerErrorException(
+        `No audio format available for video ${cleanId}`,
+      );
+    }
     return format;
   }
 
