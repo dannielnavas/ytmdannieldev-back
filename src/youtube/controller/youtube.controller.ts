@@ -23,10 +23,14 @@ export class YoutubeController {
   constructor(private readonly youtubeService: YoutubeService) {}
 
   @Get('dashboard')
-  getDashboardData(@Req() req: Request) {
+  getDashboardData(
+    @Req() req: Request,
+    @Query('refresh') refresh?: string,
+  ) {
     const userPayload = (req as any).user as Token;
+    const forceRefresh = refresh === 'true' || refresh === '1';
 
-    return this.youtubeService.getDashboardData(userPayload.sub);
+    return this.youtubeService.getDashboardData(userPayload.sub, forceRefresh);
   }
 
   @Public()

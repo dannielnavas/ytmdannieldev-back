@@ -8,7 +8,10 @@ import {
   OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { UsersService } from '../../users/services/users/users.service.js';
+import { YoutubeCache } from '../entities/youtube-cache.entity.js';
 import YTMusic from 'ytmusic-api';
 
 import crypto from 'crypto';
@@ -23,6 +26,10 @@ import type { ConfigType } from '@nestjs/config';
 export class YoutubeService implements OnModuleInit {
   private ytmusic = new YTMusic();
   yt: Innertube;
+  private readonly memoryCache = new Map<
+    string,
+    { data: any; expiresAt: number }
+  >();
 
   async onModuleInit() {
     Platform.shim.eval = async (data: any) => new Function(data.output)();
@@ -36,13 +43,53 @@ export class YoutubeService implements OnModuleInit {
     private readonly usersService: UsersService,
     @Inject(config.KEY)
     private readonly configService: ConfigType<typeof config>,
+    @InjectRepository(YoutubeCache)
+    private readonly youtubeCacheRepository: Repository<YoutubeCache>,
   ) {}
 
-  async getDashboardData(userId: number) {
+  async getDashboardData(userId: number, forceRefresh = false) {
+    const memoryKey = `dashboard:${userId}`;
+    const now = Date.now();
+
+    // 1. Nivel 1: Caché en memoria caliente (0ms)
+    if (!forceRefresh) {
+      const memCached = this.memoryCache.get(memoryKey);
+      if (memCached && memCached.expiresAt > now) {
+        return memCached.data;
+      }
+    }
+
+    // 2. Nivel 2: Caché persistente en base de datos PostgreSQL (<30ms)
+    let existingCache: YoutubeCache | null = null;
+    try {
+      existingCache = await this.youtubeCacheRepository.findOne({
+        where: { user_id: userId, cache_key: 'dashboard' },
+      });
+
+      if (
+        !forceRefresh &&
+        existingCache &&
+        existingCache.expires_at &&
+        existingCache.expires_at.getTime() > now
+      ) {
+        this.memoryCache.set(memoryKey, {
+          data: existingCache.data,
+          expiresAt: existingCache.expires_at.getTime(),
+        });
+        return existingCache.data;
+      }
+    } catch (dbErr) {
+      console.warn('Error querying youtube cache from database:', dbErr);
+    }
+
+    // 3. Si no existe, expiró o se solicitó refresco forzado, consultar a YouTube Music
     const rawCookies =
       await this.usersService.findByIdReturnYoutubeCookie(userId);
 
     if (!rawCookies) {
+      if (existingCache?.data) {
+        return existingCache.data;
+      }
       throw new UnauthorizedException('No cookies found for user');
     }
 
@@ -95,9 +142,44 @@ export class YoutubeService implements OnModuleInit {
       });
 
       const playlists = await ytmusic.getHomeSections();
+
+      // 4. Guardar en caché de base de datos y memoria
+      const ttlHours = this.configService.youtubeCacheTtlHours || 6;
+      const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
+
+      try {
+        if (existingCache) {
+          existingCache.data = playlists;
+          existingCache.expires_at = expiresAt;
+          await this.youtubeCacheRepository.save(existingCache);
+        } else {
+          const newCache = this.youtubeCacheRepository.create({
+            user_id: userId,
+            cache_key: 'dashboard',
+            data: playlists,
+            expires_at: expiresAt,
+          });
+          await this.youtubeCacheRepository.save(newCache);
+        }
+      } catch (saveErr) {
+        console.warn('Error saving youtube cache to database:', saveErr);
+      }
+
+      this.memoryCache.set(memoryKey, {
+        data: playlists,
+        expiresAt: expiresAt.getTime(),
+      });
+
       return playlists;
     } catch (error) {
-      console.error('Error initializing YTMusic with cookies:', error);
+      console.error('Error fetching YouTube Music dashboard:', error);
+
+      // Resiliencia: Devolver caché previa aunque haya expirado si la API de YouTube falla
+      if (existingCache?.data) {
+        console.warn('Falling back to existing youtube cache due to API error');
+        return existingCache.data;
+      }
+
       throw new InternalServerErrorException(
         'Could not fetch YouTube Music dashboard',
       );

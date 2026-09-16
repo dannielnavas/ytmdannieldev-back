@@ -27,5 +27,9 @@ export default registerAs('config', () => {
     sharedSecretLastFM: process.env.SHARED_SECRET_LAST_FM,
     registeredToLastFM: process.env.REGISTERED_TO_LAST_FM,
     lrcLibUrl: process.env.LRCLIB_URL,
+    youtubeCacheTtlHours: parseInt(
+      process.env.YOUTUBE_CACHE_TTL_HOURS || '6',
+      10,
+    ),
   };
 });

@@ -41,6 +41,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
         SHARED_SECRET_LAST_FM: Joi.string().required(),
         REGISTERED_TO_LAST_FM: Joi.string().required(),
         LRCLIB_URL: Joi.string().required(),
+        YOUTUBE_CACHE_TTL_HOURS: Joi.number().default(6).optional(),
       }),
     }),
     DatabaseModule,
