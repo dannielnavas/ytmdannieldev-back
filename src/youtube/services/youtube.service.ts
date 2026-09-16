@@ -4,6 +4,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
+  NotFoundException,
   OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -13,15 +14,8 @@ import YTMusic from 'ytmusic-api';
 import crypto from 'crypto';
 import { Cookie, CookieJar } from 'tough-cookie';
 import axios from 'axios';
-import type { AxiosInstance, AxiosResponse } from 'axios';
-import type { Readable } from 'stream';
-import {
-  ClientType,
-  Innertube,
-  Misc,
-  Platform,
-  UniversalCache,
-} from 'youtubei.js';
+import type { AxiosInstance } from 'axios';
+import { Innertube, Misc, Platform, UniversalCache } from 'youtubei.js';
 import config from '../../config.js';
 import type { ConfigType } from '@nestjs/config';
 
@@ -235,11 +229,7 @@ export class YoutubeService implements OnModuleInit {
     return this.ytmusic.getAlbum(albumId);
   }
 
-  async getLyrics(
-    track_name: string,
-    artist_name: string,
-    duration: number,
-  ): Promise<AxiosResponse> {
+  async getLyrics(track_name: string, artist_name: string) {
     if (!track_name) {
       throw new BadRequestException(`track_name is required`);
     }
@@ -248,9 +238,37 @@ export class YoutubeService implements OnModuleInit {
     }
     // Sometimes youtube artist names have " - Topic" or other suffixes. Let's clean it up slightly if needed.
     const cleanArtist = artist_name.replace(/ - Topic$/, '').trim();
+    console.log('track_name', track_name);
+    console.log('artist_name', cleanArtist);
 
-    return axios.get(
-      `${this.configService.lrcLibUrl}?track_name=${track_name}&artist_name=${cleanArtist}&duration=${duration}`,
-    );
+    // remover la parte de "(Official (Video) (Lyric)" etc, buscar el primer parentesis y todo lo que este despues se elimina
+    const clearTrackName = track_name.split('(')[0].split(')')[0].trim();
+
+    console.log('clearTrackName', clearTrackName.trim());
+    console.log(this.configService.lrcLibUrl);
+    try {
+      const response = await axios.get(
+        this.configService.lrcLibUrl || 'https://lrclib.net/api/get',
+        {
+          params: {
+            track_name: clearTrackName,
+            artist_name: cleanArtist,
+          },
+        },
+      );
+      console.log('Lyrics fetched:', response.data);
+      return response.data;
+    } catch (error: any) {
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 404) {
+          throw new NotFoundException('Lyrics not found');
+        }
+        throw new BadGatewayException(
+          error.response?.data?.message ||
+            'Error fetching lyrics from provider',
+        );
+      }
+      throw error;
+    }
   }
 }
