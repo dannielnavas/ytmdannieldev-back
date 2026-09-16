@@ -1,18 +1,6 @@
 import { ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../../auth/guard/jwt-auth/jwt-auth.guard.js';
-import {
-  Body,
-  Controller,
-  Get,
-  Header,
-  Headers,
-  Param,
-  ParseIntPipe,
-  Patch,
-  Post,
-  Req,
-  UseGuards,
-} from '@nestjs/common';
+import { Controller, Get, Req, UseGuards } from '@nestjs/common';
 import { UsersService } from '../../services/users/users.service.js';
 import type { Request } from 'express';
 import { Token } from '../../../auth/models/token.model.js';

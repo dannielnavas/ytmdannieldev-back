@@ -22,5 +22,10 @@ export default registerAs('config', () => {
       apiKey: process.env.CLOUDINARY_API_KEY,
       apiSecret: process.env.CLOUDINARY_API_SECRET,
     },
+    nameApplicationLastFM: process.env.NAME_APPLICATION_LAST_FM,
+    apiKeyLastFM: process.env.API_KEY_LAST_FM,
+    sharedSecretLastFM: process.env.SHARED_SECRET_LAST_FM,
+    registeredToLastFM: process.env.REGISTERED_TO_LAST_FM,
+    lrcLibUrl: process.env.LRCLIB_URL,
   };
 });

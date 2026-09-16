@@ -1,5 +1,7 @@
 import {
   BadGatewayException,
+  BadRequestException,
+  Inject,
   Injectable,
   InternalServerErrorException,
   OnModuleInit,
@@ -11,9 +13,17 @@ import YTMusic from 'ytmusic-api';
 import crypto from 'crypto';
 import { Cookie, CookieJar } from 'tough-cookie';
 import axios from 'axios';
-import type { AxiosInstance } from 'axios';
+import type { AxiosInstance, AxiosResponse } from 'axios';
 import type { Readable } from 'stream';
-import { ClientType, Innertube, Misc, Platform, UniversalCache } from 'youtubei.js';
+import {
+  ClientType,
+  Innertube,
+  Misc,
+  Platform,
+  UniversalCache,
+} from 'youtubei.js';
+import config from '../../config.js';
+import type { ConfigType } from '@nestjs/config';
 
 @Injectable()
 export class YoutubeService implements OnModuleInit {
@@ -28,7 +38,11 @@ export class YoutubeService implements OnModuleInit {
     });
   }
 
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    @Inject(config.KEY)
+    private readonly configService: ConfigType<typeof config>,
+  ) {}
 
   async getDashboardData(userId: number) {
     const rawCookies =
@@ -219,5 +233,24 @@ export class YoutubeService implements OnModuleInit {
 
   async viewAlbum(albumId: string) {
     return this.ytmusic.getAlbum(albumId);
+  }
+
+  async getLyrics(
+    track_name: string,
+    artist_name: string,
+    duration: number,
+  ): Promise<AxiosResponse> {
+    if (!track_name) {
+      throw new BadRequestException(`track_name is required`);
+    }
+    if (!artist_name) {
+      throw new BadRequestException(`artist_name is required`);
+    }
+    // Sometimes youtube artist names have " - Topic" or other suffixes. Let's clean it up slightly if needed.
+    const cleanArtist = artist_name.replace(/ - Topic$/, '').trim();
+
+    return axios.get(
+      `${this.configService.lrcLibUrl}?track_name=${track_name}&artist_name=${cleanArtist}&duration=${duration}`,
+    );
   }
 }
