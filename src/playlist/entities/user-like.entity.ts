@@ -17,8 +17,8 @@ export class UserLike {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
-  userId: string;
+  @Column({ type: 'int' })
+  userId: number;
 
   @Column({ type: 'uuid' })
   trackId: string;

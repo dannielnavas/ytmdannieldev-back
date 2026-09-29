@@ -3,14 +3,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { UserLike } from '../../entities/user-like.entity.js';
 import { Repository } from 'typeorm';
 import { Track } from '../../entities/track.entity.js';
+import { ToggleLikeDto } from '../../dtos/like.dto.js';
 
-export interface YoutubeTrackInput {
-  youtubeId: string;
-  title: string;
-  artist: string;
-  duration: number;
-  thumbnailUrl?: string;
-}
+export type YoutubeTrackInput = ToggleLikeDto;
 
 @Injectable()
 export class LikesService {
@@ -23,8 +18,8 @@ export class LikesService {
 
   // 1. Toggle: Da like si no existe, lo elimina si ya existía
   async toggleLike(
-    userId: string,
-    trackData: YoutubeTrackInput,
+    userId: number,
+    trackData: ToggleLikeDto,
   ): Promise<{ isLiked: boolean }> {
     // Asegurar que el track exista en DB
     let track = await this.trackRepo.findOne({
@@ -53,7 +48,7 @@ export class LikesService {
   }
 
   // 2. Obtener lista ordenada (las agregadas más recientemente primero)
-  async getUserLikedTracks(userId: string): Promise<Track[]> {
+  async getUserLikedTracks(userId: number): Promise<Track[]> {
     const likes = await this.likeRepo.find({
       where: { userId },
       relations: { track: true },
@@ -64,7 +59,7 @@ export class LikesService {
   }
 
   // 3. Chequear estado para la canción actual
-  async isTrackLiked(userId: string, youtubeId: string): Promise<boolean> {
+  async isTrackLiked(userId: number, youtubeId: string): Promise<boolean> {
     const count = await this.likeRepo
       .createQueryBuilder('like')
       .innerJoin('like.track', 'track')
