@@ -10,6 +10,7 @@ import { DatabaseModule } from './database/database/database.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { UsersModule } from './users/users.module.js';
 import { YoutubeModule } from './youtube/youtube.module.js';
+import { PlaylistModule } from './playlist/playlist/playlist.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -48,6 +49,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     AuthModule,
     UsersModule,
     YoutubeModule,
+    PlaylistModule,
   ],
   controllers: [AppController],
   providers: [AppService],
