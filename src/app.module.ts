@@ -11,6 +11,8 @@ import { AuthModule } from './auth/auth.module.js';
 import { UsersModule } from './users/users.module.js';
 import { YoutubeModule } from './youtube/youtube.module.js';
 import { PlaylistModule } from './playlist/playlist/playlist.module.js';
+import { LastfmModule } from './lastfm/lastfm.module.js';
+import { DashboardModule } from './dashboard/dashboard.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -50,6 +52,8 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     UsersModule,
     YoutubeModule,
     PlaylistModule,
+    LastfmModule,
+    DashboardModule,
   ],
   controllers: [AppController],
   providers: [AppService],

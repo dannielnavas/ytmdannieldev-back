@@ -69,4 +69,69 @@ export class LikesService {
 
     return count > 0;
   }
+
+  // 4. Conteo rápido de likes
+  async getUserLikesCount(userId: number): Promise<number> {
+    return this.likeRepo.count({ where: { userId } });
+  }
+
+  // 5. Métricas de resumen (total canciones, duración total, artistas únicos)
+  async getUserStatsSummary(userId: number): Promise<{
+    totalLikes: number;
+    totalDurationSeconds: number;
+    uniqueArtistsCount: number;
+  }> {
+    const raw = await this.likeRepo
+      .createQueryBuilder('like')
+      .innerJoin('like.track', 'track')
+      .select('COUNT(like.id)', 'totalLikes')
+      .addSelect('COALESCE(SUM(track.duration), 0)', 'totalDuration')
+      .addSelect('COUNT(DISTINCT track.artist)', 'uniqueArtists')
+      .where('like.userId = :userId', { userId })
+      .getRawOne();
+
+    return {
+      totalLikes: parseInt(raw?.totalLikes || '0', 10),
+      totalDurationSeconds: parseInt(raw?.totalDuration || '0', 10),
+      uniqueArtistsCount: parseInt(raw?.uniqueArtists || '0', 10),
+    };
+  }
+
+  // 6. Top artistas con más likes
+  async getTopArtists(
+    userId: number,
+    limit: number = 5,
+  ): Promise<
+    Array<{ artist: string; likesCount: number; totalDuration: number }>
+  > {
+    const raw = await this.likeRepo
+      .createQueryBuilder('like')
+      .innerJoin('like.track', 'track')
+      .select('track.artist', 'artist')
+      .addSelect('COUNT(like.id)', 'likesCount')
+      .addSelect('COALESCE(SUM(track.duration), 0)', 'totalDuration')
+      .where('like.userId = :userId', { userId })
+      .groupBy('track.artist')
+      .orderBy('COUNT(like.id)', 'DESC')
+      .limit(limit)
+      .getRawMany();
+
+    return raw.map((r) => ({
+      artist: r.artist,
+      likesCount: parseInt(r.likesCount || '0', 10),
+      totalDuration: parseInt(r.totalDuration || '0', 10),
+    }));
+  }
+
+  // 7. Canciones recientes con like
+  async getRecentLikes(userId: number, limit: number = 6): Promise<Track[]> {
+    const likes = await this.likeRepo.find({
+      where: { userId },
+      relations: { track: true },
+      order: { likedAt: 'DESC' },
+      take: limit,
+    });
+
+    return likes.map((like) => like.track);
+  }
 }
