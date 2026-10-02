@@ -19,7 +19,7 @@ import { UsersModule } from '../users/users.module.js';
       useFactory: (configService: ConfigType<typeof config>) => {
         return {
           secret: configService.jwtSecret,
-          signOptions: { expiresIn: '24h' },
+          signOptions: { expiresIn: '30d' },
         };
       },
     }),
