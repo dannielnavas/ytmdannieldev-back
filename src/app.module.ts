@@ -13,6 +13,7 @@ import { YoutubeModule } from './youtube/youtube.module.js';
 import { PlaylistModule } from './playlist/playlist/playlist.module.js';
 import { LastfmModule } from './lastfm/lastfm.module.js';
 import { DashboardModule } from './dashboard/dashboard.module.js';
+import { SponsorblockModule } from './sponsorblock/sponsorblock.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -45,6 +46,9 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
         REGISTERED_TO_LAST_FM: Joi.string().required(),
         LRCLIB_URL: Joi.string().required(),
         YOUTUBE_CACHE_TTL_HOURS: Joi.number().default(6).optional(),
+        SPONSORBLOCK_URL: Joi.string()
+          .default('https://sponsor.ajay.app')
+          .optional(),
       }),
     }),
     DatabaseModule,
@@ -54,6 +58,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     PlaylistModule,
     LastfmModule,
     DashboardModule,
+    SponsorblockModule,
   ],
   controllers: [AppController],
   providers: [AppService],

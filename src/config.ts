@@ -31,5 +31,6 @@ export default registerAs('config', () => {
       process.env.YOUTUBE_CACHE_TTL_HOURS || '6',
       10,
     ),
+    sponsorBlockUrl: process.env.SPONSORBLOCK_URL || 'https://sponsor.ajay.app',
   };
 });
