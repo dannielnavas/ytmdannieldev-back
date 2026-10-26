@@ -47,6 +47,45 @@ export class YoutubeService implements OnModuleInit {
     private readonly youtubeCacheRepository: Repository<YoutubeCache>,
   ) {}
 
+  private filterDashboardSections(
+    sections: any[],
+    userPlaylistIds: Set<string> = new Set(),
+  ) {
+    if (!Array.isArray(sections)) return [];
+
+    const communitySectionRegex = /comunidad|community/i;
+
+    return sections
+      .filter((sec: any) => !communitySectionRegex.test(sec.title || ''))
+      .map((sec: any) => {
+        const cleanContents = (sec.contents || [])
+          .filter(Boolean)
+          .filter((item: any) => {
+            if (item.type === 'SONG') {
+              return Boolean(item.videoId && item.name);
+            }
+            if (item.type === 'ALBUM') {
+              return Boolean(item.name);
+            }
+            if (item.type === 'PLAYLIST') {
+              const plId = item.playlistId || '';
+              const isUserPl = userPlaylistIds.has(plId.replace(/^VL/, ''));
+              const isMixOrRadio =
+                plId.startsWith('RD') ||
+                /mix|radio|supermix|tu mezcla/i.test(item.name || '');
+              return isUserPl || isMixOrRadio;
+            }
+            return false;
+          });
+
+        return {
+          title: sec.title,
+          contents: cleanContents,
+        };
+      })
+      .filter((sec: any) => sec.contents && sec.contents.length > 0);
+  }
+
   async getDashboardData(userId: number, forceRefresh = false) {
     const memoryKey = `dashboard:${userId}`;
     const now = Date.now();
@@ -96,67 +135,253 @@ export class YoutubeService implements OnModuleInit {
     const cleanCookies = rawCookies.replace(/(\r\n|\n|\r)/gm, '').trim();
 
     try {
-      const ytmusic = new YTMusic();
-      await ytmusic.initialize({ GL: 'CO', HL: 'es' });
+      const userProfile = await this.usersService
+        .findById(userId)
+        .catch(() => null);
 
-      const session = ytmusic as unknown as {
-        cookiejar: CookieJar;
-        client: AxiosInstance;
-      };
+      // A. Cliente Innertube autenticado para biblioteca del usuario y feed personalizado
+      const authedYtPromise = (async () => {
+        try {
+          return await Innertube.create({
+            cache: new UniversalCache(false),
+            cookie: cleanCookies,
+            location: 'CO',
+            lang: 'es',
+          });
+        } catch (err) {
+          console.warn('Error initializing authed Innertube:', err);
+          return null;
+        }
+      })();
 
-      // --- cookies en dominio correcto (music.youtube.com) ---
-      for (const cookieStr of cleanCookies.split('; ')) {
-        const cookie = Cookie.parse(cookieStr);
-        if (cookie) {
-          session.cookiejar.setCookieSync(cookie, 'https://music.youtube.com/');
+      // B. Cliente ytmusic-api para secciones estándar de YouTube Music
+      const ytmusicPromise = (async () => {
+        try {
+          const ytmusic = new YTMusic();
+          await ytmusic.initialize({ GL: 'CO', HL: 'es' });
+
+          const session = ytmusic as unknown as {
+            cookiejar: CookieJar;
+            client: AxiosInstance;
+          };
+
+          for (const cookieStr of cleanCookies.split('; ')) {
+            const cookie = Cookie.parse(cookieStr);
+            if (cookie) {
+              session.cookiejar.setCookieSync(
+                cookie,
+                'https://music.youtube.com/',
+              );
+            }
+          }
+
+          const sapisidMatch = cleanCookies.match(
+            /(?:SAPISID|__Secure-3PAPISID)=([^;]+)/,
+          );
+          const sapisid = sapisidMatch?.[1]?.trim();
+          const origin = 'https://music.youtube.com';
+
+          const getSapisidHash = (s: string): string => {
+            const timestamp = Math.floor(Date.now() / 1000);
+            const sha1 = crypto.createHash('sha1');
+            sha1.update(`${timestamp} ${s} ${origin}`);
+            return `${timestamp}_${sha1.digest('hex')}`;
+          };
+
+          session.client.interceptors.request.use((req) => {
+            req.headers['cookie'] = cleanCookies;
+            req.headers['origin'] = origin;
+            req.headers['referer'] = `${origin}/`;
+            if (sapisid) {
+              req.headers['authorization'] =
+                `SAPISIDHASH ${getSapisidHash(sapisid)}`;
+              req.headers['x-origin'] = origin;
+              req.headers['x-goog-authuser'] = '0';
+            }
+            return req;
+          });
+
+          return await ytmusic.getHomeSections();
+        } catch (err) {
+          console.warn('Error fetching ytmusic.getHomeSections:', err);
+          return [];
+        }
+      })();
+
+      const [authedYt, ytHomeSections] = await Promise.all([
+        authedYtPromise,
+        ytmusicPromise,
+      ]);
+
+      // Consultar biblioteca y feed personal en paralelo si authedYt está disponible
+      let library: any = null;
+      let feed: any = null;
+      if (authedYt) {
+        const [libRes, feedRes] = await Promise.all([
+          authedYt.music.getLibrary().catch((e: any) => {
+            console.warn('Error getting user library:', e?.message || e);
+            return null;
+          }),
+          authedYt.music.getHomeFeed().catch((e: any) => {
+            console.warn('Error getting home feed:', e?.message || e);
+            return null;
+          }),
+        ]);
+        library = libRes;
+        feed = feedRes;
+      }
+
+      // 1. Extraer playlists que le pertenecen al usuario logueado
+      const rawUserPlaylists = (library?.contents?.[0]?.items || []).filter(
+        (item: any) => {
+          const id = item.id || '';
+          return (
+            id &&
+            id !== 'VLSE' &&
+            !id.startsWith('SE') &&
+            (item.item_type === 'playlist' ||
+              item.type === 'MusicTwoRowItem' ||
+              item.type === 'TwoRowItem' ||
+              id.startsWith('VLPL') ||
+              id.startsWith('PL'))
+          );
+        },
+      );
+
+      const userPlaylistIds = new Set<string>(
+        rawUserPlaylists.map((p: any) => String(p.id || '').replace(/^VL/, '')),
+      );
+
+      const userPlaylists = rawUserPlaylists.map((item: any) => {
+        const rawId = item.id || '';
+        const plId = rawId.startsWith('VLPL') ? rawId.replace(/^VL/, '') : rawId;
+        return {
+          type: 'PLAYLIST' as const,
+          playlistId: plId,
+          name: item.title?.text || item.title?.toString() || 'Playlist',
+          artist: {
+            name: userProfile?.full_name || 'Tú',
+            artistId: null,
+          },
+          thumbnails: this.parseThumbnails(item.thumbnails || item.thumbnail),
+        };
+      });
+
+      // 2. Extraer canciones recomendadas para este usuario
+      let recommendedSongs: any[] = [];
+      if (feed?.sections?.length) {
+        const quickPicksShelf =
+          feed.sections.find((s: any) => {
+            const title = (
+              s.header?.title?.text ||
+              s.title?.text ||
+              ''
+            ).toLowerCase();
+            return (
+              title.includes('rápida') ||
+              title.includes('quick') ||
+              title.includes('canciones') ||
+              title.includes('para ti') ||
+              title.includes('escuchar')
+            );
+          }) ||
+          feed.sections.find((s: any) => {
+            const items = s.contents || s.items || [];
+            return items.some(
+              (it: any) =>
+                it?.type === 'MusicResponsiveListItem' ||
+                (it?.id && it?.artists),
+            );
+          }) ||
+          feed.sections[0];
+
+        const rawSongs = (
+          quickPicksShelf?.contents ||
+          quickPicksShelf?.items ||
+          []
+        ).filter((item: any) => item && (item.id || item.video_id));
+
+        recommendedSongs = rawSongs
+          .map((item: any) => ({
+            type: 'SONG' as const,
+            videoId: item.id || item.video_id,
+            name: item.title?.text || item.title?.toString() || item.title || '',
+            artist: this.parseArtist(
+              item.artists?.[0] || item.author,
+              'Artista desconocido',
+            ),
+            album: item.album
+              ? {
+                  name: item.album.name || item.album.title || '',
+                  albumId: item.album.id || null,
+                }
+              : null,
+            duration: this.parseDuration(item.duration),
+            thumbnails: this.parseThumbnails(item.thumbnails || item.thumbnail),
+          }))
+          .filter((song: any) => Boolean(song.videoId && song.name));
+      }
+
+      // Si Innertube no devolvió canciones recomendadas, extraer canciones válidas de ytHomeSections
+      if (recommendedSongs.length === 0 && ytHomeSections?.length) {
+        for (const sec of ytHomeSections) {
+          const songItems = (sec.contents || []).filter(
+            (c: any) => c && c.type === 'SONG' && c.videoId && c.name,
+          );
+          if (songItems.length > 0) {
+            recommendedSongs = songItems;
+            break;
+          }
         }
       }
 
-      // --- SAPISIDHASH ---
-      const sapisidMatch = cleanCookies.match(
-        /(?:SAPISID|__Secure-3PAPISID)=([^;]+)/,
+      // 3. Filtrar secciones de YouTube omitiendo playlists de la comunidad o de otras personas
+      const filteredYtSections = this.filterDashboardSections(
+        ytHomeSections,
+        userPlaylistIds,
       );
-      const sapisid = sapisidMatch?.[1]?.trim();
 
-      const origin = 'https://music.youtube.com';
+      // 4. Ensamblar la respuesta consolidada en orden prioritario:
+      // 1° Canciones recomendadas para este usuario
+      // 2° Playlists pertenecientes al usuario logueado
+      // 3° Mixes recomendados, radios y álbumes recomendados por YouTube
+      const finalSections: any[] = [];
 
-      const getSapisidHash = (sapisid: string): string => {
-        const timestamp = Math.floor(Date.now() / 1000);
-        const sha1 = crypto.createHash('sha1');
-        sha1.update(`${timestamp} ${sapisid} ${origin}`);
-        return `${timestamp}_${sha1.digest('hex')}`;
-      };
+      if (recommendedSongs.length > 0) {
+        finalSections.push({
+          title: 'Canciones recomendadas',
+          contents: recommendedSongs,
+        });
+      }
 
-      // --- interceptor en axios: Authorization + headers de identidad ---
-      session.client.interceptors.request.use((req) => {
-        req.headers['cookie'] = cleanCookies;
-        req.headers['origin'] = origin;
-        req.headers['referer'] = `${origin}/`;
-        if (sapisid) {
-          req.headers['authorization'] =
-            `SAPISIDHASH ${getSapisidHash(sapisid)}`;
-          req.headers['x-origin'] = origin;
-          req.headers['x-goog-authuser'] = '0';
-        }
-        return req;
-      });
+      if (userPlaylists.length > 0) {
+        finalSections.push({
+          title: 'Tus listas de reproducción',
+          contents: userPlaylists,
+        });
+      }
 
-      const playlists = await ytmusic.getHomeSections();
+      finalSections.push(...filteredYtSections);
 
-      // 4. Guardar en caché de base de datos y memoria
+      // Si todo quedó vacío (caso extremo), intentar devolver fallback de caché filtrada
+      if (finalSections.length === 0 && existingCache?.data) {
+        return this.filterDashboardSections(existingCache.data, userPlaylistIds);
+      }
+
+      // 5. Guardar en caché de base de datos y memoria
       const ttlHours = this.configService.youtubeCacheTtlHours || 6;
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
 
       try {
         if (existingCache) {
-          existingCache.data = playlists;
+          existingCache.data = finalSections;
           existingCache.expires_at = expiresAt;
           await this.youtubeCacheRepository.save(existingCache);
         } else {
           const newCache = this.youtubeCacheRepository.create({
             user_id: userId,
             cache_key: 'dashboard',
-            data: playlists,
+            data: finalSections,
             expires_at: expiresAt,
           });
           await this.youtubeCacheRepository.save(newCache);
@@ -166,11 +391,11 @@ export class YoutubeService implements OnModuleInit {
       }
 
       this.memoryCache.set(memoryKey, {
-        data: playlists,
+        data: finalSections,
         expiresAt: expiresAt.getTime(),
       });
 
-      return playlists;
+      return finalSections;
     } catch (error) {
       console.error('Error fetching YouTube Music dashboard:', error);
 

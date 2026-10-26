@@ -117,6 +117,85 @@ describe('YoutubeService', () => {
       const result = await service.getDashboardData(1);
       expect(result).toEqual(mockCachedData);
     });
+
+    it('should filter out community sections and other users playlists, while keeping mixes and user playlists', () => {
+      const mockRawSections = [
+        {
+          title: 'De la comunidad',
+          contents: [
+            {
+              type: 'PLAYLIST',
+              playlistId: 'PLother_user_playlist',
+              name: 'Bachata de Pedro',
+              artist: { name: 'Pedro' },
+            },
+          ],
+        },
+        {
+          title: 'Mixes personalizados',
+          contents: [
+            {
+              type: 'PLAYLIST',
+              playlistId: 'RDTMAK5uy_mix1',
+              name: 'Mi supermix',
+              artist: { name: 'YouTube Music' },
+            },
+            {
+              type: 'PLAYLIST',
+              playlistId: 'PLother_user_2',
+              name: 'Playlist de Juan',
+              artist: { name: 'Juan' },
+            },
+            {
+              type: 'PLAYLIST',
+              playlistId: 'PLmy_own_playlist',
+              name: 'Mis favoritas',
+              artist: { name: 'Tú' },
+            },
+          ],
+        },
+        {
+          title: 'Álbumes para ti',
+          contents: [
+            {
+              type: 'ALBUM',
+              name: 'Meteora',
+              albumId: 'OLAK5uy_album1',
+              artist: { name: 'Linkin Park' },
+            },
+          ],
+        },
+      ];
+
+      const userPlaylistIds = new Set(['PLmy_own_playlist']);
+      const filtered = (service as any).filterDashboardSections(
+        mockRawSections,
+        userPlaylistIds,
+      );
+
+      // Section 'De la comunidad' should be completely omitted
+      expect(
+        filtered.find((s: any) => s.title === 'De la comunidad'),
+      ).toBeUndefined();
+
+      // 'Mixes personalizados' should only keep the YouTube mix and user's own playlist
+      const mixSection = filtered.find(
+        (s: any) => s.title === 'Mixes personalizados',
+      );
+      expect(mixSection).toBeDefined();
+      expect(mixSection.contents).toHaveLength(2);
+      expect(mixSection.contents.map((c: any) => c.playlistId)).toEqual([
+        'RDTMAK5uy_mix1',
+        'PLmy_own_playlist',
+      ]);
+
+      // 'Álbumes para ti' should be preserved
+      const albumSection = filtered.find(
+        (s: any) => s.title === 'Álbumes para ti',
+      );
+      expect(albumSection).toBeDefined();
+      expect(albumSection.contents).toHaveLength(1);
+    });
   });
 
   describe('getLyrics', () => {
