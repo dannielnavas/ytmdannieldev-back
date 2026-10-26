@@ -15,7 +15,10 @@ function transformToStringArray(value: any): string[] | undefined {
         // Fallback to comma split
       }
     }
-    return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+    return trimmed
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
   return [String(value)];
 }
@@ -75,7 +78,10 @@ export class GetHashPrefixQueryDto {
     example: false,
   })
   @IsOptional()
-  @Transform(({ value }) => value === 'true' || value === true || value === 1 || value === '1')
+  @Transform(
+    ({ value }) =>
+      value === 'true' || value === true || value === 1 || value === '1',
+  )
   @IsBoolean()
   trimUUIDs?: boolean;
 }

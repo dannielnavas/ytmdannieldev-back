@@ -36,10 +36,7 @@ export class DashboardController {
     description:
       'Si el usuario tiene canciones con like, prioriza el dashboard personal enriquecido con Last.fm y adjunta el feed de YouTube como secundario. Si no tiene likes, activa la vista principal de YouTube Music.',
   })
-  async getDashboard(
-    @Req() req: Request,
-    @Query() query: DashboardQueryDto,
-  ) {
+  async getDashboard(@Req() req: Request, @Query() query: DashboardQueryDto) {
     const userId = this.getUserId(req);
     return this.dashboardService.getDashboard(userId, {
       includeYoutube: query.includeYoutube,
@@ -51,10 +48,7 @@ export class DashboardController {
   @ApiOperation({
     summary: 'Alias de /dashboard para consulta de estado y métricas',
   })
-  async getSummary(
-    @Req() req: Request,
-    @Query() query: DashboardQueryDto,
-  ) {
+  async getSummary(@Req() req: Request, @Query() query: DashboardQueryDto) {
     const userId = this.getUserId(req);
     return this.dashboardService.getDashboard(userId, {
       includeYoutube: query.includeYoutube,

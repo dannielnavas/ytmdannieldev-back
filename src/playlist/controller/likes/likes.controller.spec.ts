@@ -29,4 +29,3 @@ describe('LikesController', () => {
     expect(controller).toBeDefined();
   });
 });
-

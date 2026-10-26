@@ -23,10 +23,7 @@ export class YoutubeController {
   constructor(private readonly youtubeService: YoutubeService) {}
 
   @Get('dashboard')
-  getDashboardData(
-    @Req() req: Request,
-    @Query('refresh') refresh?: string,
-  ) {
+  getDashboardData(@Req() req: Request, @Query('refresh') refresh?: string) {
     const userPayload = (req as any).user as Token;
     const forceRefresh = refresh === 'true' || refresh === '1';
 
@@ -137,9 +134,12 @@ export class YoutubeController {
     return this.youtubeService.search(q);
   }
 
-  @Get('playlist/:id')
-  async viewPlaylist(@Param('id') id: string) {
-    return this.youtubeService.viewPlaylist(id);
+  @Get(['playlist/:playlistId', 'playlist/:id'])
+  async viewPlaylist(
+    @Param('playlistId') playlistId?: string,
+    @Param('id') id?: string,
+  ) {
+    return this.youtubeService.viewPlaylist(playlistId || id || '');
   }
 
   @Get('album/:id')

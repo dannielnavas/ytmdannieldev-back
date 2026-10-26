@@ -15,7 +15,10 @@ function transformToStringArray(value: any): string[] | undefined {
         // Fallback
       }
     }
-    return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+    return trimmed
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
   return [String(value)];
 }

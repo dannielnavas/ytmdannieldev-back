@@ -53,4 +53,3 @@ export class LikesController {
     return { isLiked };
   }
 }
-

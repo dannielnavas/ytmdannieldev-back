@@ -158,5 +158,106 @@ describe('YoutubeService', () => {
       );
     });
   });
-});
 
+  describe('viewPlaylist', () => {
+    it('should throw BadRequestException if playlistId is empty', async () => {
+      await expect(service.viewPlaylist('')).rejects.toThrow(
+        BadRequestException,
+      );
+      await expect(service.viewPlaylist('   ')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('should resolve video radio mix (RDAMVM...) via yt.music.getUpNext', async () => {
+      const mockUpNext = {
+        contents: [
+          {
+            video_id: 'dQw4w9WgXcQ',
+            title: 'Never Gonna Give You Up',
+            author: 'Rick Astley',
+            duration: { seconds: 212 },
+            thumbnail: [{ url: 'http://thumb.jpg', width: 400, height: 225 }],
+          },
+        ],
+      };
+      const mockSongInfo = {
+        basic_info: {
+          title: 'Never Gonna Give You Up',
+          author: 'Rick Astley',
+          thumbnail: [{ url: 'http://thumb.jpg', width: 400, height: 225 }],
+        },
+      };
+
+      (service as any).yt = {
+        music: {
+          getUpNext: vi.fn().mockResolvedValue(mockUpNext),
+          getInfo: vi.fn().mockResolvedValue(mockSongInfo),
+        },
+      };
+
+      const result = await service.viewPlaylist('RDAMVMdQw4w9WgXcQ');
+
+      expect(result.infoPlaylist.name).toBe('Mix: Never Gonna Give You Up');
+      expect(result.infoPlaylist.artist.name).toBe('Rick Astley');
+      expect(result.songsList).toHaveLength(1);
+      expect(result.songsList[0].videoId).toBe('dQw4w9WgXcQ');
+      expect(result.songsList[0].duration).toBe(212);
+    });
+
+    it('should resolve mix playlist (RDCLAK...) via yt.music.getPlaylist', async () => {
+      const mockPlaylist = {
+        header: {
+          title: 'Dancing With the Broom',
+          author: { name: 'YouTube Music' },
+          thumbnail: {
+            contents: [{ url: 'http://cover.jpg', width: 544, height: 544 }],
+          },
+        },
+        contents: [
+          {
+            id: 'VBcs8DZxBGc',
+            title: 'MI EX TENIA RAZON',
+            artists: [{ name: 'KAROL G', channel_id: '123' }],
+            duration: { seconds: 162 },
+            thumbnail: {
+              contents: [{ url: 'http://thumb.jpg', width: 400, height: 225 }],
+            },
+          },
+        ],
+      };
+
+      (service as any).yt = {
+        music: {
+          getPlaylist: vi.fn().mockResolvedValue(mockPlaylist),
+        },
+      };
+
+      const result = await service.viewPlaylist(
+        'RDCLAK5uy_k4QNAro7aEx9CClDY9Wz5-G_CC_aO6NcU',
+      );
+
+      expect(result.infoPlaylist.name).toBe('Dancing With the Broom');
+      expect(result.songsList).toHaveLength(1);
+      expect(result.songsList[0].videoId).toBe('VBcs8DZxBGc');
+      expect(result.songsList[0].artist.name).toBe('KAROL G');
+    });
+
+    it('should throw NotFoundException if all providers fail', async () => {
+      (service as any).yt = {
+        music: {
+          getPlaylist: vi.fn().mockRejectedValue(new Error('Not found')),
+        },
+        getPlaylist: vi.fn().mockRejectedValue(new Error('Not found')),
+      };
+      (service as any).ytmusic = {
+        getPlaylist: vi.fn().mockRejectedValue(new Error('Not found')),
+        getAlbum: vi.fn().mockRejectedValue(new Error('Not found')),
+      };
+
+      await expect(service.viewPlaylist('nonexistent-id')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+});

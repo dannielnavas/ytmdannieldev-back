@@ -1,5 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsNotEmpty, IsNumber, IsOptional, IsString } from 'class-validator';
+import {
+  IsIn,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+} from 'class-validator';
 
 export class VoteSegmentDto {
   @ApiProperty({
@@ -11,7 +17,8 @@ export class VoteSegmentDto {
   UUID: string;
 
   @ApiProperty({
-    description: 'Local userID of the voter (client generated string >= 30 chars)',
+    description:
+      'Local userID of the voter (client generated string >= 30 chars)',
     example: 'a'.repeat(32),
   })
   @IsString()

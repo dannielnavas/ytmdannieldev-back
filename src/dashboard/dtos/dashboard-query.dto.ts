@@ -17,8 +17,7 @@ export class DashboardQueryDto {
   includeYoutube?: boolean = true;
 
   @ApiPropertyOptional({
-    description:
-      'Forzar refresco omitiendo caché para YouTube Music',
+    description: 'Forzar refresco omitiendo caché para YouTube Music',
     default: false,
   })
   @IsOptional()

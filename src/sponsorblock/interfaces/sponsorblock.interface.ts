@@ -12,11 +12,7 @@ export type SponsorBlockCategory =
   | 'chapter';
 
 export type SponsorBlockActionType =
-  | 'skip'
-  | 'mute'
-  | 'poi'
-  | 'full'
-  | 'chapter';
+  'skip' | 'mute' | 'poi' | 'full' | 'chapter';
 
 export interface SponsorBlockSegment {
   UUID: string;

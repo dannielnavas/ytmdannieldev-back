@@ -72,7 +72,8 @@ export class SponsorblockController {
   @Public()
   @Get('segments/hash/:prefix')
   @ApiOperation({
-    summary: 'Obtener segmentos por prefijo SHA-256 (Modo de máxima privacidad)',
+    summary:
+      'Obtener segmentos por prefijo SHA-256 (Modo de máxima privacidad)',
     description:
       'Consulta los segmentos usando los primeros 4-32 caracteres del hash sha256 del videoID.',
   })
@@ -116,7 +117,8 @@ export class SponsorblockController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Reportar que un segmento fue visualizado/omitido',
-    description: 'Suma una visualización al segmento en las métricas de SponsorBlock.',
+    description:
+      'Suma una visualización al segmento en las métricas de SponsorBlock.',
   })
   async recordView(@Body() dto: ViewedSegmentDto) {
     return this.sponsorblockService.recordView(dto);
@@ -169,7 +171,11 @@ export class SponsorblockController {
   ) {
     return this.sponsorblockService.getLockCategories(
       videoId,
-      Array.isArray(actionTypes) ? actionTypes : actionTypes ? [actionTypes] : undefined,
+      Array.isArray(actionTypes)
+        ? actionTypes
+        : actionTypes
+          ? [actionTypes]
+          : undefined,
     );
   }
 

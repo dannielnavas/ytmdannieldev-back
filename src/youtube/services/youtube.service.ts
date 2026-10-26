@@ -296,15 +296,322 @@ export class YoutubeService implements OnModuleInit {
     };
   }
 
-  async viewPlaylist(playlistId: string) {
-    const playListData = await this.ytmusic.getPlaylist(playlistId);
-    const songsOfThePlaylist = await this.ytmusic.getPlaylistVideos(
-      playListData.playlistId,
-    );
+  private async ensureInnertube(): Promise<Innertube> {
+    if (!this.yt) {
+      Platform.shim.eval = async (data: any) => new Function(data.output)();
+      this.yt = await Innertube.create({
+        cache: new UniversalCache(false),
+      });
+    }
+    return this.yt;
+  }
+
+  private parseDuration(duration: any): number {
+    if (typeof duration === 'number') return duration;
+    if (typeof duration?.seconds === 'number') return duration.seconds;
+    if (typeof duration === 'string' || typeof duration?.text === 'string') {
+      const text = (
+        typeof duration === 'string' ? duration : duration.text
+      ).trim();
+      const parts = text.split(':').map((p: string) => parseInt(p, 10));
+      if (parts.every((p: number) => !isNaN(p))) {
+        if (parts.length === 3)
+          return parts[0] * 3600 + parts[1] * 60 + parts[2];
+        if (parts.length === 2) return parts[0] * 60 + parts[1];
+      }
+    }
+    return 0;
+  }
+
+  private parseThumbnails(
+    rawThumbnails: any,
+  ): { url: string; width: number; height: number }[] {
+    if (!rawThumbnails) return [];
+    const list = Array.isArray(rawThumbnails)
+      ? rawThumbnails
+      : Array.isArray(rawThumbnails.contents)
+        ? rawThumbnails.contents
+        : Array.isArray(rawThumbnails.thumbnails)
+          ? rawThumbnails.thumbnails
+          : [rawThumbnails];
+
+    return list
+      .filter((t: any) => t && (t.url || typeof t === 'string'))
+      .map((t: any) => ({
+        url: typeof t === 'string' ? t : t.url,
+        width: t.width || 0,
+        height: t.height || 0,
+      }));
+  }
+
+  private parseArtist(
+    rawArtist: any,
+    fallbackName = 'YouTube Music',
+  ): { name: string; artistId: string | null } {
+    if (!rawArtist) return { name: fallbackName, artistId: null };
+    if (typeof rawArtist === 'string') {
+      const clean = rawArtist.trim();
+      return {
+        name: clean && clean !== 'N/A' ? clean : fallbackName,
+        artistId: null,
+      };
+    }
+    const name = rawArtist.name || rawArtist.text || fallbackName;
+    const artistId =
+      rawArtist.channel_id || rawArtist.id || rawArtist.artistId || null;
     return {
-      infoPlaylist: playListData,
-      songsList: songsOfThePlaylist,
+      name: name && name !== 'N/A' ? name : fallbackName,
+      artistId,
     };
+  }
+
+  async viewPlaylist(playlistId: string) {
+    if (!playlistId || typeof playlistId !== 'string') {
+      throw new BadRequestException('playlistId is required');
+    }
+
+    const rawId = decodeURIComponent(playlistId).trim();
+    if (!rawId) {
+      throw new BadRequestException('playlistId is required');
+    }
+
+    const yt = await this.ensureInnertube();
+
+    // 1. Detectar Radio / Mix basado en video o canción:
+    // - RDAMVM<videoId>
+    // - RD<videoId> (con videoId de 11 caracteres)
+    // - RDMM<videoId>
+    // - videoId directo de 11 caracteres
+    let radioVideoId: string | null = null;
+    if (rawId.startsWith('RDAMVM')) {
+      radioVideoId = rawId.replace('RDAMVM', '');
+    } else if (
+      rawId.startsWith('RD') &&
+      !rawId.startsWith('RDCLAK') &&
+      !rawId.startsWith('RDTMAK') &&
+      rawId.length === 13
+    ) {
+      radioVideoId = rawId.slice(2);
+    } else if (rawId.startsWith('RDMM') && rawId.length > 4) {
+      radioVideoId = rawId.slice(4);
+    } else if (/^[a-zA-Z0-9_-]{11}$/.test(rawId)) {
+      radioVideoId = rawId;
+    }
+
+    if (radioVideoId) {
+      try {
+        const [upNext, songInfo] = await Promise.all([
+          yt.music.getUpNext(radioVideoId).catch(() => null),
+          yt.music.getInfo(radioVideoId).catch(() => null),
+        ]);
+
+        if (upNext?.contents?.length) {
+          const firstUpNext = (upNext.contents as any[])?.[0];
+          const songTitle = songInfo?.basic_info?.title;
+          const title = songTitle ? `Mix: ${songTitle}` : 'Mix Radio';
+          const artistName =
+            songInfo?.basic_info?.author ||
+            firstUpNext?.author ||
+            'YouTube Music';
+          const artistId = songInfo?.basic_info?.channel_id || null;
+          const thumbnails = this.parseThumbnails(
+            songInfo?.basic_info?.thumbnail || firstUpNext?.thumbnail,
+          );
+
+          const songsList = upNext.contents.map((item: any) => ({
+            type: 'VIDEO' as const,
+            videoId: item.video_id || item.id,
+            name: item.title?.toString() || '',
+            artist: this.parseArtist(
+              item.artists?.[0] || item.author,
+              artistName,
+            ),
+            duration: this.parseDuration(item.duration),
+            thumbnails: this.parseThumbnails(item.thumbnail),
+          }));
+
+          return {
+            infoPlaylist: {
+              type: 'PLAYLIST',
+              playlistId: rawId,
+              name: title,
+              artist: { name: artistName, artistId },
+              videoCount: songsList.length,
+              thumbnails: thumbnails.length
+                ? thumbnails
+                : songsList[0]?.thumbnails || [],
+            },
+            songsList,
+          };
+        }
+      } catch (error) {
+        console.warn('Error resolving video radio mix via upNext:', error);
+      }
+    }
+
+    // 2. Radio basada en playlist: RDAMPL<playlistId> -> extraer id base
+    let cleanId = rawId;
+    if (cleanId.startsWith('RDAMPL')) {
+      cleanId = cleanId.replace('RDAMPL', '');
+    }
+
+    // 3. Intentar con Innertube Music (soporta RDCLAK..., RDTMAK..., PL..., etc.)
+    const tryMusicPlaylist = async (idToTry: string) => {
+      try {
+        const pl = await yt.music.getPlaylist(idToTry);
+        if (pl?.contents?.length) {
+          const header = pl.header as any;
+          const rawTitle = header?.title?.toString();
+          const title =
+            rawTitle && rawTitle !== 'undefined' ? rawTitle : 'Playlist';
+          const rawArtist =
+            header?.author?.name ||
+            header?.strapline_text_one?.toString() ||
+            '';
+          const artistInfo = this.parseArtist(rawArtist, 'YouTube Music');
+          const thumbnails = this.parseThumbnails(
+            header?.thumbnail || header?.thumbnails,
+          );
+
+          const songsList = pl.contents.map((item: any) => ({
+            type: 'VIDEO' as const,
+            videoId: item.id || item.video_id,
+            name: item.title?.toString() || item.name || '',
+            artist: this.parseArtist(
+              item.artists?.[0] || item.authors?.[0] || item.author,
+              artistInfo.name,
+            ),
+            duration: this.parseDuration(item.duration),
+            thumbnails: this.parseThumbnails(item.thumbnail),
+          }));
+
+          return {
+            infoPlaylist: {
+              type: 'PLAYLIST',
+              playlistId: rawId,
+              name: title,
+              artist: artistInfo,
+              videoCount: songsList.length,
+              thumbnails: thumbnails.length
+                ? thumbnails
+                : songsList[0]?.thumbnails || [],
+            },
+            songsList,
+          };
+        }
+      } catch {
+        // Continuar con los siguientes intentos
+      }
+      return null;
+    };
+
+    let result = await tryMusicPlaylist(cleanId);
+    if (result) return result;
+
+    if (!cleanId.startsWith('VL')) {
+      result = await tryMusicPlaylist('VL' + cleanId);
+      if (result) return result;
+    } else {
+      result = await tryMusicPlaylist(cleanId.slice(2));
+      if (result) return result;
+    }
+
+    // 4. Fallback: Si es un álbum (OLAK... o MPREb...)
+    if (cleanId.startsWith('OLAK') || cleanId.startsWith('MPREb')) {
+      try {
+        const album = await this.ytmusic.getAlbum(cleanId).catch(() => null);
+        if (album?.songs?.length) {
+          return {
+            infoPlaylist: {
+              type: 'PLAYLIST',
+              playlistId: rawId,
+              name: album.name,
+              artist: album.artist,
+              videoCount: album.songs.length,
+              thumbnails: this.parseThumbnails(album.thumbnails),
+            },
+            songsList: album.songs.map((s: any) => ({
+              type: 'VIDEO' as const,
+              videoId: s.videoId,
+              name: s.name,
+              artist: s.artist,
+              duration: this.parseDuration(s.duration),
+              thumbnails: this.parseThumbnails(
+                s.thumbnails || album.thumbnails,
+              ),
+            })),
+          };
+        }
+      } catch {}
+    }
+
+    // 5. Fallback: Playlist general de YouTube (yt.getPlaylist)
+    try {
+      const pl = await yt.getPlaylist(cleanId);
+      if (pl?.videos?.length) {
+        const songsList = (pl.videos as any[])
+          .map((v: any) => {
+            const title =
+              v.metadata?.title?.text ||
+              v.title?.text ||
+              v.title?.toString() ||
+              '';
+            const artistName =
+              v.metadata?.metadata?.metadata_rows?.[0]?.metadata_parts?.[0]
+                ?.text?.text ||
+              pl.info?.author?.name ||
+              'YouTube';
+            return {
+              type: 'VIDEO' as const,
+              videoId: v.content_id || v.id,
+              name: title,
+              artist: { name: artistName, artistId: null },
+              duration: this.parseDuration(v.duration),
+              thumbnails: this.parseThumbnails(
+                v.content_image?.image || v.thumbnails,
+              ),
+            };
+          })
+          .filter((s) => s.videoId);
+
+        if (songsList.length) {
+          return {
+            infoPlaylist: {
+              type: 'PLAYLIST',
+              playlistId: rawId,
+              name: pl.info?.title || 'Playlist',
+              artist: {
+                name: pl.info?.author?.name || 'YouTube',
+                artistId: pl.info?.author?.id || null,
+              },
+              videoCount: songsList.length,
+              thumbnails:
+                this.parseThumbnails(pl.info?.thumbnails) ||
+                songsList[0]?.thumbnails ||
+                [],
+            },
+            songsList,
+          };
+        }
+      }
+    } catch {}
+
+    // 6. Fallback final: ytmusic-api
+    try {
+      const idForYtm = cleanId.startsWith('VL') ? cleanId : 'VL' + cleanId;
+      const playListData = await this.ytmusic.getPlaylist(idForYtm);
+      const songsOfThePlaylist = await this.ytmusic.getPlaylistVideos(
+        playListData.playlistId || idForYtm,
+      );
+      return {
+        infoPlaylist: playListData,
+        songsList: songsOfThePlaylist,
+      };
+    } catch {}
+
+    throw new NotFoundException(
+      `No se pudo cargar la playlist con ID "${playlistId}"`,
+    );
   }
 
   async viewAlbum(albumId: string) {

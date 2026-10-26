@@ -159,7 +159,9 @@ export class SponsorblockService {
           error.response.status,
         );
       }
-      throw new InternalServerErrorException('Error connecting to SponsorBlock');
+      throw new InternalServerErrorException(
+        'Error connecting to SponsorBlock',
+      );
     }
   }
 
@@ -237,7 +239,9 @@ export class SponsorblockService {
           error.response.status,
         );
       }
-      throw new InternalServerErrorException('Error connecting to SponsorBlock');
+      throw new InternalServerErrorException(
+        'Error connecting to SponsorBlock',
+      );
     }
   }
 
@@ -285,12 +289,14 @@ export class SponsorblockService {
     };
 
     try {
-      const response = await axios.post<
-        SponsorBlockSubmittedSegmentResponse[]
-      >(`${this.baseUrl}/api/skipSegments`, payload, {
-        timeout: 8000,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      const response = await axios.post<SponsorBlockSubmittedSegmentResponse[]>(
+        `${this.baseUrl}/api/skipSegments`,
+        payload,
+        {
+          timeout: 8000,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
 
       return response.data;
     } catch (error: any) {
@@ -334,7 +340,9 @@ export class SponsorblockService {
 
       return { success: true };
     } catch (error: any) {
-      this.logger.error(`Failed to vote on segment ${dto.UUID}: ${error?.message}`);
+      this.logger.error(
+        `Failed to vote on segment ${dto.UUID}: ${error?.message}`,
+      );
       if (error?.response) {
         throw new HttpException(
           error.response.data || 'Error voting on segment',
@@ -357,7 +365,9 @@ export class SponsorblockService {
 
       return { success: true };
     } catch (error: any) {
-      this.logger.error(`Failed to record view for ${dto.UUID}: ${error?.message}`);
+      this.logger.error(
+        `Failed to record view for ${dto.UUID}: ${error?.message}`,
+      );
       if (error?.response) {
         throw new HttpException(
           error.response.data || 'Error recording view',
@@ -380,7 +390,9 @@ export class SponsorblockService {
     }
 
     if (!params['userID'] && !params['publicUserID']) {
-      throw new BadRequestException('Either userID or publicUserID is required');
+      throw new BadRequestException(
+        'Either userID or publicUserID is required',
+      );
     }
 
     try {
@@ -415,7 +427,9 @@ export class SponsorblockService {
     }
 
     if (!params['userID'] && !params['publicUserID']) {
-      throw new BadRequestException('Either userID or publicUserID is required');
+      throw new BadRequestException(
+        'Either userID or publicUserID is required',
+      );
     }
 
     try {

@@ -60,7 +60,10 @@ describe('DashboardService', () => {
       expect(result.activeView).toBe('youtube');
       expect(result.personal).toBeNull();
       expect(result.youtube).toEqual(mockYtSections);
-      expect(mockYoutubeService.getDashboardData).toHaveBeenCalledWith(1, false);
+      expect(mockYoutubeService.getDashboardData).toHaveBeenCalledWith(
+        1,
+        false,
+      );
     });
   });
 
@@ -109,7 +112,11 @@ describe('DashboardService', () => {
       );
 
       mockLastfmService.getSimilarArtists.mockResolvedValue([
-        { name: 'Justice', match: '0.88', url: 'https://last.fm/music/Justice' },
+        {
+          name: 'Justice',
+          match: '0.88',
+          url: 'https://last.fm/music/Justice',
+        },
       ]);
 
       const mockYtSections = [{ title: 'Novedades', items: [] }];

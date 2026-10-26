@@ -64,10 +64,7 @@ describe('SponsorblockController', () => {
 
       await controller.getSegmentsByParam('dQw4w9WgXcQ', {});
 
-      expect(service.getSkipSegments).toHaveBeenCalledWith(
-        'dQw4w9WgXcQ',
-        {},
-      );
+      expect(service.getSkipSegments).toHaveBeenCalledWith('dQw4w9WgXcQ', {});
     });
   });
 

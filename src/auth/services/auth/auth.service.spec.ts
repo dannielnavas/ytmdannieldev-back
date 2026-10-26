@@ -63,8 +63,14 @@ describe('AuthService', () => {
                       channelHandle: { runs: [{ text: '@dannieldev' }] },
                       accountPhoto: {
                         thumbnails: [
-                          { url: 'https://lh3.googleusercontent.com/small.png', width: 40 },
-                          { url: 'https://lh3.googleusercontent.com/large.png', width: 120 },
+                          {
+                            url: 'https://lh3.googleusercontent.com/small.png',
+                            width: 40,
+                          },
+                          {
+                            url: 'https://lh3.googleusercontent.com/large.png',
+                            width: 120,
+                          },
                         ],
                       },
                     },
@@ -83,7 +89,9 @@ describe('AuthService', () => {
                           },
                           {
                             compactLinkRenderer: {
-                              title: { runs: [{ text: 'Compras y membresías' }] },
+                              title: {
+                                runs: [{ text: 'Compras y membresías' }],
+                              },
                               navigationEndpoint: {
                                 browseEndpoint: { browseId: 'SPmemberships' },
                               },
@@ -107,15 +115,18 @@ describe('AuthService', () => {
         } as any;
       });
 
-      const result = await service.extractYoutubeAccountInfo('SAPISID=test1234; SSID=xyz');
+      const result = await service.extractYoutubeAccountInfo(
+        'SAPISID=test1234; SSID=xyz',
+      );
       expect(result.is_authenticated).toBe(true);
       expect(result.is_youtube_premium).toBe(true);
       expect(result.full_name).toBe('Danniel Navas');
       expect(result.email).toBe('danniel@gmail.com');
-      expect(result.profile_image).toBe('https://lh3.googleusercontent.com/large.png');
+      expect(result.profile_image).toBe(
+        'https://lh3.googleusercontent.com/large.png',
+      );
       expect(result.youtube_handle).toBe('@dannieldev');
       expect(result.youtube_channel_id).toBe('UC1234567890');
     });
   });
 });
-
