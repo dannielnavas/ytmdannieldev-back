@@ -30,6 +30,14 @@ export class YoutubeController {
     return this.youtubeService.getDashboardData(userPayload.sub, forceRefresh);
   }
 
+  @Get('recap')
+  getRecapData(@Req() req: Request, @Query('refresh') refresh?: string) {
+    const userPayload = (req as any).user as Token;
+    const forceRefresh = refresh === 'true' || refresh === '1';
+
+    return this.youtubeService.getRecapData(userPayload.sub, forceRefresh);
+  }
+
   @Public()
   @Get('stream')
   async streamByQuery(
@@ -136,10 +144,13 @@ export class YoutubeController {
 
   @Get(['playlist/:playlistId', 'playlist/:id'])
   async viewPlaylist(
+    @Req() req: Request,
     @Param('playlistId') playlistId?: string,
     @Param('id') id?: string,
   ) {
-    return this.youtubeService.viewPlaylist(playlistId || id || '');
+    const userPayload = (req as any)?.user as Token | undefined;
+    const userId = userPayload?.sub ? Number(userPayload.sub) : undefined;
+    return this.youtubeService.viewPlaylist(playlistId || id || '', userId);
   }
 
   @Get('album/:id')

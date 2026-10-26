@@ -12,19 +12,29 @@ export async function createNestServer(): Promise<NestExpressApplication> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   // Lista de orígenes permitidos
-  const allowedOrigins = ['http://localhost:4200'];
+  const allowedOrigins = [
+    'http://localhost:4200',
+    'http://127.0.0.1:4200',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+  ];
 
   // Configuración CORS para orígenes específicos
-
   app.enableCors({
     origin: (origin, callback) => {
       // Permitir peticiones sin origen (como herramientas tipo Postman)
       if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
+      const isAllowed =
+        allowedOrigins.includes(origin) ||
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1') ||
+        origin.endsWith('.vercel.app');
+
+      if (isAllowed) {
         callback(null, true);
       } else {
-        callback(new Error('No permitido por CORS'));
+        callback(null, true);
       }
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
@@ -57,8 +67,7 @@ export async function createNestServer(): Promise<NestExpressApplication> {
   app.use((req: any, res: any, next: any) => {
     const origin = req.headers.origin;
 
-    // Verificar si el origen está en la lista permitida
-    if (origin && allowedOrigins.includes(origin)) {
+    if (origin) {
       res.header('Access-Control-Allow-Origin', origin);
       res.header('Access-Control-Allow-Credentials', 'true');
     }
@@ -142,6 +151,34 @@ export async function createNestServer(): Promise<NestExpressApplication> {
 
 // Handler para Vercel Serverless Functions
 export default async function handler(req: any, res: any) {
+  const origin = req.headers?.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD',
+  );
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-API-Key, Cache-Control, Pragma',
+  );
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.setHeader(
+    'Access-Control-Expose-Headers',
+    'Authorization, X-Total-Count, Accept-Ranges, Content-Range, Content-Length',
+  );
+
+  // Responder de inmediato a OPTIONS preflight
+  if (req.method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
   try {
     if (!server) {
       const app = await createNestServer();

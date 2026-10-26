@@ -26,6 +26,8 @@ describe('YoutubeService', () => {
   beforeEach(async () => {
     mockUsersService = {
       findByIdReturnYoutubeCookie: vi.fn(),
+      findById: vi.fn(),
+      findFirstYoutubeCookie: vi.fn().mockResolvedValue(null),
     };
 
     mockYoutubeCacheRepository = {
@@ -322,6 +324,57 @@ describe('YoutubeService', () => {
       expect(result.songsList[0].artist.name).toBe('KAROL G');
     });
 
+    it('should preserve recap playlists and recap sections even if not in user playlist ids', () => {
+      const mockRawSections = [
+        {
+          title: 'Tu Recap',
+          contents: [
+            {
+              type: 'PLAYLIST',
+              playlistId: 'RDRC_spring_2024',
+              name: 'Recap de primavera',
+              artist: { name: 'YouTube Music' },
+            },
+          ],
+        },
+        {
+          title: 'Mixes y Recaps',
+          contents: [
+            {
+              type: 'PLAYLIST',
+              playlistId: 'PLsome_recap',
+              name: 'Resumen del año 2024',
+              artist: { name: 'YouTube Music' },
+            },
+            {
+              type: 'PLAYLIST',
+              playlistId: 'PLrandom_stranger',
+              name: 'Playlist de un desconocido',
+              artist: { name: 'Desconocido' },
+            },
+          ],
+        },
+      ];
+
+      const userPlaylistIds = new Set<string>();
+      const filtered = (service as any).filterDashboardSections(
+        mockRawSections,
+        userPlaylistIds,
+      );
+
+      const recapSection = filtered.find((s: any) => s.title === 'Tu Recap');
+      expect(recapSection).toBeDefined();
+      expect(recapSection.contents).toHaveLength(1);
+      expect(recapSection.contents[0].playlistId).toBe('RDRC_spring_2024');
+
+      const mixedSection = filtered.find(
+        (s: any) => s.title === 'Mixes y Recaps',
+      );
+      expect(mixedSection).toBeDefined();
+      expect(mixedSection.contents).toHaveLength(1);
+      expect(mixedSection.contents[0].name).toBe('Resumen del año 2024');
+    });
+
     it('should throw NotFoundException if all providers fail', async () => {
       (service as any).yt = {
         music: {
@@ -337,6 +390,95 @@ describe('YoutubeService', () => {
       await expect(service.viewPlaylist('nonexistent-id')).rejects.toThrow(
         NotFoundException,
       );
+    });
+
+    it('should return cached playlist instantly without querying providers', async () => {
+      const cachedPlaylist = {
+        infoPlaylist: { name: 'Cached Playlist' },
+        songsList: [],
+      };
+      (service as any).playlistCache.set('pl:cached_1:anon', {
+        data: cachedPlaylist,
+        expiresAt: Date.now() + 100000,
+      });
+
+      const result = await service.viewPlaylist('cached_1');
+      expect(result).toEqual(cachedPlaylist);
+    });
+
+    it('should resolve recap playlist for rawId "recap" with authenticated Innertube', async () => {
+      const mockRecapPlaylist = {
+        header: {
+          title: 'Tu Recap de Fin de Año',
+          author: { name: 'YouTube Music' },
+          thumbnail: [{ url: 'http://thumb.jpg', width: 400, height: 400 }],
+        },
+        contents: [
+          {
+            id: 'video_recap_1',
+            title: 'Top Song 1',
+            artists: [{ name: 'Top Artist' }],
+            duration: { seconds: 200 },
+          },
+        ],
+      };
+
+      const mockRecapObj = {
+        getPlaylist: vi.fn().mockResolvedValue(mockRecapPlaylist),
+      };
+
+      const mockAuthedClient = {
+        music: {
+          getRecap: vi.fn().mockResolvedValue(mockRecapObj),
+        },
+      };
+
+      vi.spyOn(service, 'getAuthedInnertube').mockResolvedValue(
+        mockAuthedClient as any,
+      );
+
+      const result = await service.viewPlaylist('recap', 1);
+
+      expect(result.infoPlaylist.name).toBe('Tu Recap de Fin de Año');
+      expect(result.songsList).toHaveLength(1);
+      expect(result.songsList[0].videoId).toBe('video_recap_1');
+    });
+  });
+
+  describe('getRecapData', () => {
+    it('should return cached recap from memory if available', async () => {
+      const mockCachedRecap = {
+        available: true,
+        title: 'Tu Recap',
+        sections: [],
+      };
+      (service as any).memoryCache.set('recap:1', {
+        data: mockCachedRecap,
+        expiresAt: Date.now() + 100000,
+      });
+
+      const result = await service.getRecapData(1);
+      expect(result).toEqual(mockCachedRecap);
+    });
+
+    it('should return empty recap structure gracefully if recap is unavailable from Innertube', async () => {
+      mockYoutubeCacheRepository.findOne.mockResolvedValueOnce(null);
+      const mockAuthedClient = {
+        music: {
+          getRecap: vi.fn().mockResolvedValue(null),
+        },
+      };
+      vi.spyOn(service, 'getAuthedInnertube').mockResolvedValue(
+        mockAuthedClient as any,
+      );
+      vi.spyOn(mockUsersService, 'findById').mockResolvedValue({
+        id: 1,
+        full_name: 'Test User',
+      } as any);
+
+      const result = await service.getRecapData(1);
+      expect(result.available).toBe(false);
+      expect(result.message).toContain('no está disponible');
     });
   });
 });

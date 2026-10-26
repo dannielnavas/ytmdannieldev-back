@@ -15,9 +15,7 @@ import { YoutubeCache } from '../entities/youtube-cache.entity.js';
 import YTMusic from 'ytmusic-api';
 
 import crypto from 'crypto';
-import { Cookie, CookieJar } from 'tough-cookie';
 import axios from 'axios';
-import type { AxiosInstance } from 'axios';
 import { Innertube, Misc, Platform, UniversalCache } from 'youtubei.js';
 import config from '../../config.js';
 import type { ConfigType } from '@nestjs/config';
@@ -27,6 +25,14 @@ export class YoutubeService implements OnModuleInit {
   private ytmusic = new YTMusic();
   yt: Innertube;
   private readonly memoryCache = new Map<
+    string,
+    { data: any; expiresAt: number }
+  >();
+  private readonly authedInnertubeCache = new Map<
+    string,
+    { client: Innertube; expiresAt: number }
+  >();
+  private readonly playlistCache = new Map<
     string,
     { data: any; expiresAt: number }
   >();
@@ -46,6 +52,49 @@ export class YoutubeService implements OnModuleInit {
     @InjectRepository(YoutubeCache)
     private readonly youtubeCacheRepository: Repository<YoutubeCache>,
   ) {}
+
+  async getAuthedInnertubeByCookie(
+    cookieStr: string,
+  ): Promise<Innertube | null> {
+    if (!cookieStr) return null;
+    const cleanCookie = cookieStr.replace(/(\r\n|\n|\r)/gm, '').trim();
+    if (!cleanCookie) return null;
+
+    const cookieHash = crypto
+      .createHash('md5')
+      .update(cleanCookie)
+      .digest('hex');
+    const cached = this.authedInnertubeCache.get(cookieHash);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+      return cached.client;
+    }
+
+    try {
+      Platform.shim.eval = async (data: any) => new Function(data.output)();
+      const client = await Innertube.create({
+        cache: new UniversalCache(false),
+        cookie: cleanCookie,
+        location: 'CO',
+        lang: 'es',
+      });
+      this.authedInnertubeCache.set(cookieHash, {
+        client,
+        expiresAt: now + 30 * 60 * 1000, // 30 minutos
+      });
+      return client;
+    } catch (err) {
+      console.warn('Error creating authed Innertube:', err);
+      return null;
+    }
+  }
+
+  async getAuthedInnertube(userId: number): Promise<Innertube | null> {
+    const rawCookies =
+      await this.usersService.findByIdReturnYoutubeCookie(userId);
+    if (!rawCookies) return null;
+    return this.getAuthedInnertubeByCookie(rawCookies);
+  }
 
   private filterDashboardSections(
     sections: any[],
@@ -73,7 +122,10 @@ export class YoutubeService implements OnModuleInit {
               const isMixOrRadio =
                 plId.startsWith('RD') ||
                 /mix|radio|supermix|tu mezcla/i.test(item.name || '');
-              return isUserPl || isMixOrRadio;
+              const isRecap =
+                plId.startsWith('RDRC') ||
+                /recap|resumen/i.test(item.name || '');
+              return isUserPl || isMixOrRadio || isRecap;
             }
             return false;
           });
@@ -132,76 +184,23 @@ export class YoutubeService implements OnModuleInit {
       throw new UnauthorizedException('No cookies found for user');
     }
 
-    const cleanCookies = rawCookies.replace(/(\r\n|\n|\r)/gm, '').trim();
-
     try {
       const userProfile = await this.usersService
         .findById(userId)
         .catch(() => null);
 
-      // A. Cliente Innertube autenticado para biblioteca del usuario y feed personalizado
-      const authedYtPromise = (async () => {
-        try {
-          return await Innertube.create({
-            cache: new UniversalCache(false),
-            cookie: cleanCookies,
-            location: 'CO',
-            lang: 'es',
-          });
-        } catch (err) {
-          console.warn('Error initializing authed Innertube:', err);
-          return null;
-        }
-      })();
+      // A. Cliente Innertube autenticado (reutilizado desde pool/cache para <5ms)
+      const authedYtPromise = this.getAuthedInnertube(userId);
 
-      // B. Cliente ytmusic-api para secciones estándar de YouTube Music
+      // B. Secciones estándar de YouTube Music vía cliente ytmusic existente (con timeout de 3.5s para no retrasar)
       const ytmusicPromise = (async () => {
         try {
-          const ytmusic = new YTMusic();
-          await ytmusic.initialize({ GL: 'CO', HL: 'es' });
-
-          const session = ytmusic as unknown as {
-            cookiejar: CookieJar;
-            client: AxiosInstance;
-          };
-
-          for (const cookieStr of cleanCookies.split('; ')) {
-            const cookie = Cookie.parse(cookieStr);
-            if (cookie) {
-              session.cookiejar.setCookieSync(
-                cookie,
-                'https://music.youtube.com/',
-              );
-            }
-          }
-
-          const sapisidMatch = cleanCookies.match(
-            /(?:SAPISID|__Secure-3PAPISID)=([^;]+)/,
-          );
-          const sapisid = sapisidMatch?.[1]?.trim();
-          const origin = 'https://music.youtube.com';
-
-          const getSapisidHash = (s: string): string => {
-            const timestamp = Math.floor(Date.now() / 1000);
-            const sha1 = crypto.createHash('sha1');
-            sha1.update(`${timestamp} ${s} ${origin}`);
-            return `${timestamp}_${sha1.digest('hex')}`;
-          };
-
-          session.client.interceptors.request.use((req) => {
-            req.headers['cookie'] = cleanCookies;
-            req.headers['origin'] = origin;
-            req.headers['referer'] = `${origin}/`;
-            if (sapisid) {
-              req.headers['authorization'] =
-                `SAPISIDHASH ${getSapisidHash(sapisid)}`;
-              req.headers['x-origin'] = origin;
-              req.headers['x-goog-authuser'] = '0';
-            }
-            return req;
-          });
-
-          return await ytmusic.getHomeSections();
+          return await Promise.race([
+            this.ytmusic.getHomeSections(),
+            new Promise<any[]>((resolve) =>
+              setTimeout(() => resolve([]), 3500),
+            ),
+          ]);
         } catch (err) {
           console.warn('Error fetching ytmusic.getHomeSections:', err);
           return [];
@@ -213,11 +212,12 @@ export class YoutubeService implements OnModuleInit {
         ytmusicPromise,
       ]);
 
-      // Consultar biblioteca y feed personal en paralelo si authedYt está disponible
+      // Consultar biblioteca, feed personal y recap en paralelo si authedYt está disponible
       let library: any = null;
       let feed: any = null;
+      let recap: any = null;
       if (authedYt) {
-        const [libRes, feedRes] = await Promise.all([
+        const [libRes, feedRes, recapRes] = await Promise.all([
           authedYt.music.getLibrary().catch((e: any) => {
             console.warn('Error getting user library:', e?.message || e);
             return null;
@@ -226,9 +226,11 @@ export class YoutubeService implements OnModuleInit {
             console.warn('Error getting home feed:', e?.message || e);
             return null;
           }),
+          authedYt.music.getRecap().catch(() => null),
         ]);
         library = libRes;
         feed = feedRes;
+        recap = recapRes;
       }
 
       // 1. Extraer playlists que le pertenecen al usuario logueado
@@ -254,7 +256,9 @@ export class YoutubeService implements OnModuleInit {
 
       const userPlaylists = rawUserPlaylists.map((item: any) => {
         const rawId = item.id || '';
-        const plId = rawId.startsWith('VLPL') ? rawId.replace(/^VL/, '') : rawId;
+        const plId = rawId.startsWith('VLPL')
+          ? rawId.replace(/^VL/, '')
+          : rawId;
         return {
           type: 'PLAYLIST' as const,
           playlistId: plId,
@@ -267,7 +271,52 @@ export class YoutubeService implements OnModuleInit {
         };
       });
 
-      // 2. Extraer canciones recomendadas para este usuario
+      // 2. Extraer secciones de Recap si están disponibles
+      const recapSections: any[] = [];
+      if (recap?.sections?.length) {
+        for (const shelf of recap.sections) {
+          const shelfTitle =
+            (shelf as any)?.header?.title?.text ||
+            (shelf as any)?.title?.text ||
+            'Tu Recap';
+          const rawItems =
+            (shelf as any)?.contents || (shelf as any)?.items || [];
+          const items = rawItems
+            .map((item: any) => {
+              const rawId = item.id || item.playlist_id || item.browse_id || '';
+              const plId = rawId.startsWith('VL')
+                ? rawId.replace(/^VL/, '')
+                : rawId;
+              if (!plId) return null;
+              return {
+                type: 'PLAYLIST' as const,
+                playlistId: plId,
+                name: item.title?.text || item.title?.toString() || 'Recap',
+                artist: {
+                  name:
+                    item.subtitle?.text ||
+                    item.author?.name ||
+                    userProfile?.full_name ||
+                    'YouTube Music',
+                  artistId: item.author?.id || null,
+                },
+                thumbnails: this.parseThumbnails(
+                  item.thumbnails || item.thumbnail,
+                ),
+              };
+            })
+            .filter((it: any) => Boolean(it && it.playlistId && it.name));
+
+          if (items.length > 0) {
+            recapSections.push({
+              title: shelfTitle,
+              contents: items,
+            });
+          }
+        }
+      }
+
+      // 3. Extraer canciones recomendadas para este usuario
       let recommendedSongs: any[] = [];
       if (feed?.sections?.length) {
         const quickPicksShelf =
@@ -305,7 +354,8 @@ export class YoutubeService implements OnModuleInit {
           .map((item: any) => ({
             type: 'SONG' as const,
             videoId: item.id || item.video_id,
-            name: item.title?.text || item.title?.toString() || item.title || '',
+            name:
+              item.title?.text || item.title?.toString() || item.title || '',
             artist: this.parseArtist(
               item.artists?.[0] || item.author,
               'Artista desconocido',
@@ -335,16 +385,17 @@ export class YoutubeService implements OnModuleInit {
         }
       }
 
-      // 3. Filtrar secciones de YouTube omitiendo playlists de la comunidad o de otras personas
+      // 4. Filtrar secciones de YouTube omitiendo playlists de la comunidad o de otras personas
       const filteredYtSections = this.filterDashboardSections(
         ytHomeSections,
         userPlaylistIds,
       );
 
-      // 4. Ensamblar la respuesta consolidada en orden prioritario:
+      // 5. Ensamblar la respuesta consolidada en orden prioritario:
       // 1° Canciones recomendadas para este usuario
-      // 2° Playlists pertenecientes al usuario logueado
-      // 3° Mixes recomendados, radios y álbumes recomendados por YouTube
+      // 2° Secciones de Recap si existen
+      // 3° Playlists pertenecientes al usuario logueado
+      // 4° Mixes recomendados, radios y álbumes recomendados por YouTube
       const finalSections: any[] = [];
 
       if (recommendedSongs.length > 0) {
@@ -352,6 +403,10 @@ export class YoutubeService implements OnModuleInit {
           title: 'Canciones recomendadas',
           contents: recommendedSongs,
         });
+      }
+
+      if (recapSections.length > 0) {
+        finalSections.push(...recapSections);
       }
 
       if (userPlaylists.length > 0) {
@@ -365,10 +420,13 @@ export class YoutubeService implements OnModuleInit {
 
       // Si todo quedó vacío (caso extremo), intentar devolver fallback de caché filtrada
       if (finalSections.length === 0 && existingCache?.data) {
-        return this.filterDashboardSections(existingCache.data, userPlaylistIds);
+        return this.filterDashboardSections(
+          existingCache.data,
+          userPlaylistIds,
+        );
       }
 
-      // 5. Guardar en caché de base de datos y memoria
+      // 6. Guardar en caché de base de datos y memoria
       const ttlHours = this.configService.youtubeCacheTtlHours || 6;
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
 
@@ -411,6 +469,171 @@ export class YoutubeService implements OnModuleInit {
     }
   }
 
+  async getRecapData(userId: number, forceRefresh = false) {
+    const memoryKey = `recap:${userId}`;
+    const now = Date.now();
+
+    if (!forceRefresh) {
+      const memCached = this.memoryCache.get(memoryKey);
+      if (memCached && memCached.expiresAt > now) {
+        return memCached.data;
+      }
+    }
+
+    let existingCache: YoutubeCache | null = null;
+    try {
+      existingCache = await this.youtubeCacheRepository.findOne({
+        where: { user_id: userId, cache_key: 'recap' },
+      });
+
+      if (
+        !forceRefresh &&
+        existingCache &&
+        existingCache.expires_at &&
+        existingCache.expires_at.getTime() > now
+      ) {
+        this.memoryCache.set(memoryKey, {
+          data: existingCache.data,
+          expiresAt: existingCache.expires_at.getTime(),
+        });
+        return existingCache.data;
+      }
+    } catch (dbErr) {
+      console.warn('Error querying recap cache from database:', dbErr);
+    }
+
+    const authedYt = await this.getAuthedInnertube(userId);
+    if (!authedYt) {
+      if (existingCache?.data) {
+        return existingCache.data;
+      }
+      throw new UnauthorizedException(
+        'No cookies found for user to load recap',
+      );
+    }
+
+    const userProfile = await this.usersService
+      .findById(userId)
+      .catch(() => null);
+
+    try {
+      const recap = await authedYt.music.getRecap().catch((e) => {
+        console.warn('Error fetching recap from Innertube:', e?.message || e);
+        return null;
+      });
+
+      if (!recap) {
+        const emptyResponse = {
+          available: false,
+          message: 'Tu Recap no está disponible en este momento.',
+          title: 'Tu Recap',
+          playlist: null,
+          sections: [],
+        };
+        return emptyResponse;
+      }
+
+      // 1. Extraer playlist principal de Recap si está disponible
+      let recapPlaylist: any = null;
+      try {
+        const pl = await recap.getPlaylist();
+        if (pl && pl.contents?.length) {
+          recapPlaylist = this.formatInnertubePlaylist('recap', pl);
+        }
+      } catch {
+        // Normal si no hay playlist de highlights lista
+      }
+
+      // 2. Extraer estantes de Recap
+      const sections: any[] = [];
+      if (recap.sections?.length) {
+        for (const shelf of recap.sections) {
+          const shelfTitle =
+            (shelf as any)?.header?.title?.text ||
+            (shelf as any)?.title?.text ||
+            'Recap';
+          const rawItems =
+            (shelf as any)?.contents || (shelf as any)?.items || [];
+          const items = rawItems
+            .map((item: any) => {
+              const rawId = item.id || item.playlist_id || item.browse_id || '';
+              const plId = rawId.startsWith('VL')
+                ? rawId.replace(/^VL/, '')
+                : rawId;
+              if (!plId) return null;
+              return {
+                type: 'PLAYLIST' as const,
+                playlistId: plId,
+                name: item.title?.text || item.title?.toString() || 'Recap',
+                artist: {
+                  name:
+                    item.subtitle?.text ||
+                    item.author?.name ||
+                    userProfile?.full_name ||
+                    'YouTube Music',
+                  artistId: item.author?.id || null,
+                },
+                thumbnails: this.parseThumbnails(
+                  item.thumbnails || item.thumbnail,
+                ),
+              };
+            })
+            .filter((it: any) => Boolean(it && it.playlistId && it.name));
+
+          if (items.length > 0) {
+            sections.push({
+              title: shelfTitle,
+              contents: items,
+            });
+          }
+        }
+      }
+
+      const result = {
+        available: true,
+        title: 'Tu Recap',
+        playlist: recapPlaylist,
+        sections,
+      };
+
+      const ttlHours = 12;
+      const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
+
+      try {
+        if (existingCache) {
+          existingCache.data = result;
+          existingCache.expires_at = expiresAt;
+          await this.youtubeCacheRepository.save(existingCache);
+        } else {
+          const newCache = this.youtubeCacheRepository.create({
+            user_id: userId,
+            cache_key: 'recap',
+            data: result,
+            expires_at: expiresAt,
+          });
+          await this.youtubeCacheRepository.save(newCache);
+        }
+      } catch (saveErr) {
+        console.warn('Error saving recap cache to database:', saveErr);
+      }
+
+      this.memoryCache.set(memoryKey, {
+        data: result,
+        expiresAt: expiresAt.getTime(),
+      });
+
+      return result;
+    } catch (err) {
+      console.error('Error getting recap data:', err);
+      if (existingCache?.data) {
+        return existingCache.data;
+      }
+      throw new InternalServerErrorException(
+        'Error obteniendo datos del Recap',
+      );
+    }
+  }
+
   async search(query: string) {
     const songs = await this.ytmusic.searchSongs(query); // title, artist, album, duration, thumbnail...
     const playlists = await this.ytmusic.searchPlaylists(query);
@@ -426,29 +649,25 @@ export class YoutubeService implements OnModuleInit {
     try {
       const rawCookie = await this.usersService.findFirstYoutubeCookie();
       if (rawCookie) {
-        const cleanCookie = rawCookie.replace(/(\r\n|\n|\r)/gm, '').trim();
-        const authedYt = await Innertube.create({
-          cache: new UniversalCache(false),
-          cookie: cleanCookie,
-          location: 'CO',
-          lang: 'es',
-        });
-        const info = await authedYt.getBasicInfo(cleanId, {
-          client: 'YTMUSIC',
-        } as any);
-        if (info.streaming_data) {
-          let format = info.chooseFormat({ type: 'audio', quality: 'best' });
-          if (!format) {
-            const audioFormats = (
-              info.streaming_data?.adaptive_formats || []
-            ).filter((f) => f.mime_type?.includes('audio'));
-            if (audioFormats.length > 0) {
-              format = audioFormats[0];
+        const authedYt = await this.getAuthedInnertubeByCookie(rawCookie);
+        if (authedYt) {
+          const info = await authedYt.getBasicInfo(cleanId, {
+            client: 'YTMUSIC',
+          } as any);
+          if (info.streaming_data) {
+            let format = info.chooseFormat({ type: 'audio', quality: 'best' });
+            if (!format) {
+              const audioFormats = (
+                info.streaming_data?.adaptive_formats || []
+              ).filter((f) => f.mime_type?.includes('audio'));
+              if (audioFormats.length > 0) {
+                format = audioFormats[0];
+              }
             }
-          }
-          if (format) {
-            this.yt = authedYt;
-            return format;
+            if (format) {
+              this.yt = authedYt;
+              return format;
+            }
           }
         }
       }
@@ -590,7 +809,53 @@ export class YoutubeService implements OnModuleInit {
     };
   }
 
-  async viewPlaylist(playlistId: string) {
+  private formatInnertubePlaylist(rawId: string, pl: any) {
+    const header = pl.header as any;
+    const rawTitle = header?.title?.toString();
+    const title = rawTitle && rawTitle !== 'undefined' ? rawTitle : 'Playlist';
+    const rawArtist =
+      header?.author?.name || header?.strapline_text_one?.toString() || '';
+    const artistInfo = this.parseArtist(rawArtist, 'YouTube Music');
+    const thumbnails = this.parseThumbnails(
+      header?.thumbnail || header?.thumbnails,
+    );
+
+    const rawItems: any[] = pl.contents?.length
+      ? pl.contents
+      : (typeof pl.page?.contents_memo?.getType === 'function'
+          ? pl.page.contents_memo.getType('MusicResponsiveListItem')
+          : null) || [];
+
+    const songsList = rawItems
+      .map((item: any) => ({
+        type: 'VIDEO' as const,
+        videoId: item.id || item.video_id,
+        name: item.title?.toString() || item.name || '',
+        artist: this.parseArtist(
+          item.artists?.[0] || item.authors?.[0] || item.author,
+          artistInfo.name,
+        ),
+        duration: this.parseDuration(item.duration),
+        thumbnails: this.parseThumbnails(item.thumbnail),
+      }))
+      .filter((s: any) => Boolean(s.videoId));
+
+    return {
+      infoPlaylist: {
+        type: 'PLAYLIST',
+        playlistId: rawId,
+        name: title,
+        artist: artistInfo,
+        videoCount: songsList.length,
+        thumbnails: thumbnails.length
+          ? thumbnails
+          : songsList[0]?.thumbnails || [],
+      },
+      songsList,
+    };
+  }
+
+  async viewPlaylist(playlistId: string, userId?: number) {
     if (!playlistId || typeof playlistId !== 'string') {
       throw new BadRequestException('playlistId is required');
     }
@@ -600,7 +865,65 @@ export class YoutubeService implements OnModuleInit {
       throw new BadRequestException('playlistId is required');
     }
 
+    // 0. Caché en memoria para respuesta instantánea (0ms)
+    const cacheKey = `pl:${rawId}:${userId || 'anon'}`;
+    const cached = this.playlistCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
+
+    let authedYt = userId ? await this.getAuthedInnertube(userId) : null;
+    if (!authedYt) {
+      const fallbackCookie = await this.usersService
+        .findFirstYoutubeCookie?.()
+        ?.catch(() => null);
+      if (fallbackCookie) {
+        authedYt = await this.getAuthedInnertubeByCookie(fallbackCookie);
+      }
+    }
     const yt = await this.ensureInnertube();
+
+    // Soporte especial para "recap" o "FEmusic_listening_review"
+    if (rawId === 'recap' || rawId === 'FEmusic_listening_review') {
+      try {
+        if (authedYt) {
+          const recap = await authedYt.music.getRecap().catch(() => null);
+          if (recap) {
+            const pl = await recap.getPlaylist().catch(() => null);
+            if (pl && pl.contents?.length) {
+              const result = this.formatInnertubePlaylist(rawId, pl);
+              this.playlistCache.set(cacheKey, {
+                data: result,
+                expiresAt: Date.now() + 5 * 60 * 1000,
+              });
+              return result;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Error resolving recap as playlist:', err);
+      }
+    }
+
+    // Soporte especial para Liked Music: "VLLM" o "LM"
+    if (rawId === 'VLLM' || rawId === 'LM') {
+      try {
+        const client = authedYt || yt;
+        const pl = await client.music.getPlaylist('LM').catch(() => null);
+        if (pl && (pl.contents?.length || pl.header)) {
+          const result = this.formatInnertubePlaylist(rawId, pl);
+          if (result.songsList.length > 0) {
+            this.playlistCache.set(cacheKey, {
+              data: result,
+              expiresAt: Date.now() + 5 * 60 * 1000,
+            });
+            return result;
+          }
+        }
+      } catch (err) {
+        console.warn('Error resolving liked music playlist:', err);
+      }
+    }
 
     // 1. Detectar Radio / Mix basado en video o canción:
     // - RDAMVM<videoId>
@@ -625,9 +948,10 @@ export class YoutubeService implements OnModuleInit {
 
     if (radioVideoId) {
       try {
+        const clientForUpNext = authedYt || yt;
         const [upNext, songInfo] = await Promise.all([
-          yt.music.getUpNext(radioVideoId).catch(() => null),
-          yt.music.getInfo(radioVideoId).catch(() => null),
+          clientForUpNext.music.getUpNext(radioVideoId).catch(() => null),
+          clientForUpNext.music.getInfo(radioVideoId).catch(() => null),
         ]);
 
         if (upNext?.contents?.length) {
@@ -655,7 +979,7 @@ export class YoutubeService implements OnModuleInit {
             thumbnails: this.parseThumbnails(item.thumbnail),
           }));
 
-          return {
+          const result = {
             infoPlaylist: {
               type: 'PLAYLIST',
               playlistId: rawId,
@@ -668,6 +992,12 @@ export class YoutubeService implements OnModuleInit {
             },
             songsList,
           };
+
+          this.playlistCache.set(cacheKey, {
+            data: result,
+            expiresAt: Date.now() + 5 * 60 * 1000,
+          });
+          return result;
         }
       } catch (error) {
         console.warn('Error resolving video radio mix via upNext:', error);
@@ -680,65 +1010,66 @@ export class YoutubeService implements OnModuleInit {
       cleanId = cleanId.replace('RDAMPL', '');
     }
 
-    // 3. Intentar con Innertube Music (soporta RDCLAK..., RDTMAK..., PL..., etc.)
+    // 3. Intentar con Innertube Music (soporta autenticado primero, RDCLAK..., RDTMAK..., RDRC..., PL..., etc.)
     const tryMusicPlaylist = async (idToTry: string) => {
       try {
-        const pl = await yt.music.getPlaylist(idToTry);
-        if (pl?.contents?.length) {
-          const header = pl.header as any;
-          const rawTitle = header?.title?.toString();
-          const title =
-            rawTitle && rawTitle !== 'undefined' ? rawTitle : 'Playlist';
-          const rawArtist =
-            header?.author?.name ||
-            header?.strapline_text_one?.toString() ||
-            '';
-          const artistInfo = this.parseArtist(rawArtist, 'YouTube Music');
-          const thumbnails = this.parseThumbnails(
-            header?.thumbnail || header?.thumbnails,
-          );
-
-          const songsList = pl.contents.map((item: any) => ({
-            type: 'VIDEO' as const,
-            videoId: item.id || item.video_id,
-            name: item.title?.toString() || item.name || '',
-            artist: this.parseArtist(
-              item.artists?.[0] || item.authors?.[0] || item.author,
-              artistInfo.name,
-            ),
-            duration: this.parseDuration(item.duration),
-            thumbnails: this.parseThumbnails(item.thumbnail),
-          }));
-
-          return {
-            infoPlaylist: {
-              type: 'PLAYLIST',
-              playlistId: rawId,
-              name: title,
-              artist: artistInfo,
-              videoCount: songsList.length,
-              thumbnails: thumbnails.length
-                ? thumbnails
-                : songsList[0]?.thumbnails || [],
-            },
-            songsList,
-          };
+        if (authedYt) {
+          try {
+            const pl = await authedYt.music.getPlaylist(idToTry);
+            const items = pl?.contents?.length
+              ? pl.contents
+              : (typeof (pl as any)?.page?.contents_memo?.getType === 'function'
+                  ? (pl as any).page.contents_memo.getType(
+                      'MusicResponsiveListItem',
+                    )
+                  : null) || [];
+            if (items.length > 0) {
+              return this.formatInnertubePlaylist(rawId, pl);
+            }
+          } catch {}
         }
-      } catch {
-        // Continuar con los siguientes intentos
-      }
+        const pl = await yt.music.getPlaylist(idToTry);
+        const items = pl?.contents?.length
+          ? pl.contents
+          : (typeof (pl as any)?.page?.contents_memo?.getType === 'function'
+              ? (pl as any).page.contents_memo.getType(
+                  'MusicResponsiveListItem',
+                )
+              : null) || [];
+        if (items.length > 0) {
+          return this.formatInnertubePlaylist(rawId, pl);
+        }
+      } catch {}
       return null;
     };
 
     let result = await tryMusicPlaylist(cleanId);
-    if (result) return result;
+    if (result) {
+      this.playlistCache.set(cacheKey, {
+        data: result,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      });
+      return result;
+    }
 
     if (!cleanId.startsWith('VL')) {
       result = await tryMusicPlaylist('VL' + cleanId);
-      if (result) return result;
+      if (result) {
+        this.playlistCache.set(cacheKey, {
+          data: result,
+          expiresAt: Date.now() + 5 * 60 * 1000,
+        });
+        return result;
+      }
     } else {
       result = await tryMusicPlaylist(cleanId.slice(2));
-      if (result) return result;
+      if (result) {
+        this.playlistCache.set(cacheKey, {
+          data: result,
+          expiresAt: Date.now() + 5 * 60 * 1000,
+        });
+        return result;
+      }
     }
 
     // 4. Fallback: Si es un álbum (OLAK... o MPREb...)
@@ -746,7 +1077,7 @@ export class YoutubeService implements OnModuleInit {
       try {
         const album = await this.ytmusic.getAlbum(cleanId).catch(() => null);
         if (album?.songs?.length) {
-          return {
+          const albumResult = {
             infoPlaylist: {
               type: 'PLAYLIST',
               playlistId: rawId,
@@ -766,13 +1097,19 @@ export class YoutubeService implements OnModuleInit {
               ),
             })),
           };
+
+          this.playlistCache.set(cacheKey, {
+            data: albumResult,
+            expiresAt: Date.now() + 5 * 60 * 1000,
+          });
+          return albumResult;
         }
       } catch {}
     }
 
-    // 5. Fallback: Playlist general de YouTube (yt.getPlaylist)
+    // 5. Fallback: Playlist general de YouTube ((authedYt || yt).getPlaylist)
     try {
-      const pl = await yt.getPlaylist(cleanId);
+      const pl = await (authedYt || yt).getPlaylist(cleanId);
       if (pl?.videos?.length) {
         const songsList = (pl.videos as any[])
           .map((v: any) => {
@@ -800,7 +1137,7 @@ export class YoutubeService implements OnModuleInit {
           .filter((s) => s.videoId);
 
         if (songsList.length) {
-          return {
+          const generalResult = {
             infoPlaylist: {
               type: 'PLAYLIST',
               playlistId: rawId,
@@ -817,6 +1154,12 @@ export class YoutubeService implements OnModuleInit {
             },
             songsList,
           };
+
+          this.playlistCache.set(cacheKey, {
+            data: generalResult,
+            expiresAt: Date.now() + 5 * 60 * 1000,
+          });
+          return generalResult;
         }
       }
     } catch {}
@@ -828,10 +1171,16 @@ export class YoutubeService implements OnModuleInit {
       const songsOfThePlaylist = await this.ytmusic.getPlaylistVideos(
         playListData.playlistId || idForYtm,
       );
-      return {
+      const ytmResult = {
         infoPlaylist: playListData,
         songsList: songsOfThePlaylist,
       };
+
+      this.playlistCache.set(cacheKey, {
+        data: ytmResult,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      });
+      return ytmResult;
     } catch {}
 
     throw new NotFoundException(

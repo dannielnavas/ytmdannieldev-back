@@ -73,9 +73,12 @@ export class UsersService {
   }
 
   async findById(id: number) {
+    if (!id || isNaN(Number(id))) {
+      throw new BadRequestException('ID de usuario inválido');
+    }
     const user = await this.userRepo.findOne({
       where: {
-        user_id: id,
+        user_id: Number(id),
       },
     });
     if (!user) {

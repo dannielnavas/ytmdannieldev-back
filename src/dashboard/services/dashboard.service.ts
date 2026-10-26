@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { LikesService } from '../../playlist/services/likes/likes.service.js';
 import { LastfmService } from '../../lastfm/services/lastfm.service.js';
 import { YoutubeService } from '../../youtube/services/youtube.service.js';
+import type { LastFmTag } from '../../lastfm/interfaces/lastfm.interface.js';
 import type {
   DashboardKpis,
   DashboardResponse,
@@ -80,24 +81,24 @@ export class DashboardService {
     }
 
     // Si tiene canciones guardadas: Dashboard personal es el protagonista
-    const personal = await this.getPersonalDashboard(userId, stats);
-
-    let youtubeData: any = null;
     const shouldIncludeYoutube = options?.includeYoutube !== false;
-    if (shouldIncludeYoutube) {
-      try {
-        youtubeData = await this.youtubeService.getDashboardData(
-          userId,
-          options?.refresh || false,
-        );
-      } catch (ytError) {
-        this.logger.warn(
-          `Feed secundario de YouTube omitido o no disponible para usuario ${userId}: ${
-            ytError instanceof Error ? ytError.message : String(ytError)
-          }`,
-        );
-      }
-    }
+
+    // Ejecución en paralelo del dashboard personal y feed secundario de YouTube para mínima latencia
+    const [personal, youtubeData] = await Promise.all([
+      this.getPersonalDashboard(userId, stats),
+      shouldIncludeYoutube
+        ? this.youtubeService
+            .getDashboardData(userId, options?.refresh || false)
+            .catch((ytError) => {
+              this.logger.warn(
+                `Feed secundario de YouTube omitido o no disponible para usuario ${userId}: ${
+                  ytError instanceof Error ? ytError.message : String(ytError)
+                }`,
+              );
+              return null;
+            })
+        : Promise.resolve(null),
+    ]);
 
     return {
       hasPersonalData: true,
@@ -117,8 +118,11 @@ export class DashboardService {
   ): Promise<PersonalDashboardData> {
     const stats =
       preloadedStats ?? (await this.likesService.getUserStatsSummary(userId));
-    const rawTopArtists = await this.likesService.getTopArtists(userId, 5);
-    const recentLikes = await this.likesService.getRecentLikes(userId, 6);
+
+    const [rawTopArtists, recentLikes] = await Promise.all([
+      this.likesService.getTopArtists(userId, 5),
+      this.likesService.getRecentLikes(userId, 6),
+    ]);
 
     const kpis: DashboardKpis = {
       totalLikes: stats.totalLikes,
@@ -129,11 +133,18 @@ export class DashboardService {
       favoriteArtist: rawTopArtists[0]?.artist || null,
     };
 
+    // Mapa para recolectar tags de los top artistas y no duplicar llamadas a Last.fm
+    const artistTagsMap = new Map<string, LastFmTag[]>();
+
     // Enriquecer top artistas con Last.fm en paralelo
     const enrichedArtists: EnrichedArtistItem[] = await Promise.all(
       rawTopArtists.map(async (item) => {
-        const info = await this.lastfmService.getArtistInfo(item.artist);
-        const tags = await this.lastfmService.getArtistTopTags(item.artist);
+        const [info, tags] = await Promise.all([
+          this.lastfmService.getArtistInfo(item.artist),
+          this.lastfmService.getArtistTopTags(item.artist),
+        ]);
+
+        artistTagsMap.set(item.artist, tags);
 
         const cleanTags = tags
           .filter((t) => !NOISE_TAGS.has(t.name.toLowerCase()))
@@ -155,11 +166,11 @@ export class DashboardService {
       }),
     );
 
-    // Calcular distribución de géneros ponderada con Last.fm
-    const topGenres = await this.calculateGenreDistribution(rawTopArtists);
-
-    // Generar recomendaciones basadas en los artistas favoritos
-    const recommendations = await this.generateRecommendations(rawTopArtists);
+    // Calcular distribución de géneros y recomendaciones en paralelo
+    const [topGenres, recommendations] = await Promise.all([
+      this.calculateGenreDistribution(rawTopArtists, artistTagsMap),
+      this.generateRecommendations(rawTopArtists),
+    ]);
 
     return {
       kpis,
@@ -172,6 +183,7 @@ export class DashboardService {
 
   private async calculateGenreDistribution(
     topArtists: Array<{ artist: string; likesCount: number }>,
+    preloadedTagsMap?: Map<string, LastFmTag[]>,
   ): Promise<GenreDistributionItem[]> {
     if (!topArtists || topArtists.length === 0) return [];
 
@@ -179,9 +191,9 @@ export class DashboardService {
 
     await Promise.all(
       topArtists.map(async (artistItem) => {
-        const tags = await this.lastfmService.getArtistTopTags(
-          artistItem.artist,
-        );
+        const tags =
+          preloadedTagsMap?.get(artistItem.artist) ??
+          (await this.lastfmService.getArtistTopTags(artistItem.artist));
         const validTags = tags.filter(
           (t) => !NOISE_TAGS.has(t.name.toLowerCase()),
         );
@@ -223,15 +235,20 @@ export class DashboardService {
     );
     const recommendations: RecommendedArtistItem[] = [];
 
-    // Tomar los 2 artistas principales para buscar similares
+    // Tomar los 2 artistas principales para buscar similares en paralelo
     const seedArtists = topArtists.slice(0, 2);
 
-    for (const seed of seedArtists) {
-      const similar = await this.lastfmService.getSimilarArtists(
-        seed.artist,
-        5,
-      );
+    const similarResults = await Promise.all(
+      seedArtists.map(async (seed) => {
+        const similar = await this.lastfmService.getSimilarArtists(
+          seed.artist,
+          5,
+        );
+        return { seedArtist: seed.artist, similar };
+      }),
+    );
 
+    for (const { seedArtist, similar } of similarResults) {
       for (const sim of similar) {
         const normalized = sim.name.toLowerCase();
         if (
@@ -243,7 +260,7 @@ export class DashboardService {
             name: sim.name,
             matchScore: sim.match ? parseFloat(sim.match) : undefined,
             imageUrl: bestImage || undefined,
-            sourceArtist: seed.artist,
+            sourceArtist: seedArtist,
             lastFmUrl: sim.url,
           });
           existingNames.add(normalized);
