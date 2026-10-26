@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import pg from 'pg';
 import config from '../../config.js';
 
 const API_KEY = config().apiKey;
@@ -21,6 +22,7 @@ const API_KEY_PROD = config().apiKeyProd;
           database,
           synchronize: true, // Solo para desarrollo (no usar en producción)
           autoLoadEntities: true,
+          driver: pg,
           ssl: {
             rejectUnauthorized: false,
           },
