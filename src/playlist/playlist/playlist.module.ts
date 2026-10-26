@@ -4,9 +4,10 @@ import { UserLike } from '../entities/user-like.entity.js';
 import { Track } from '../entities/track.entity.js';
 import { LikesService } from '../services/likes/likes.service.js';
 import { LikesController } from '../controller/likes/likes.controller.js';
+import { YoutubeModule } from '../../youtube/youtube.module.js';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([UserLike, Track])],
+  imports: [TypeOrmModule.forFeature([UserLike, Track]), YoutubeModule],
   providers: [LikesService],
   controllers: [LikesController],
   exports: [LikesService],

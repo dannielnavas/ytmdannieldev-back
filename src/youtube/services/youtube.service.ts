@@ -1192,38 +1192,110 @@ export class YoutubeService implements OnModuleInit {
     return this.ytmusic.getAlbum(albumId);
   }
 
-  async getLyrics(track_name: string, artist_name: string) {
+  async getLyrics(
+    track_name: string,
+    artist_name: string,
+    duration?: number,
+  ) {
     if (!track_name) {
       throw new BadRequestException(`track_name is required`);
     }
     if (!artist_name) {
       throw new BadRequestException(`artist_name is required`);
     }
-    // Sometimes youtube artist names have " - Topic" or other suffixes. Let's clean it up slightly if needed.
-    const cleanArtist = artist_name.replace(/ - Topic$/, '').trim();
-    console.log('track_name', track_name);
-    console.log('artist_name', cleanArtist);
 
-    // remover la parte de "(Official (Video) (Lyric)" etc, buscar el primer parentesis y todo lo que este despues se elimina
-    const clearTrackName = track_name.split('(')[0].split(')')[0].trim();
+    const cleanArtist = artist_name
+      .replace(/ - Topic$/i, '')
+      .replace(/VEVO$/i, '')
+      .trim();
 
-    console.log('clearTrackName', clearTrackName.trim());
-    console.log(this.configService.lrcLibUrl);
+    const clearTrackName = track_name
+      .replace(/\[[^\]]*\]/g, '') // remover [Official Video], [Remastered], etc.
+      .replace(/\([^)]*\)/g, '') // remover (feat. ...), (Lyric Video), etc.
+      .replace(/ - Topic$/i, '')
+      .replace(
+        /Official Video|Official Audio|Music Video|Lyric Video|Audio/gi,
+        '',
+      )
+      .trim();
+
+    const cacheDurationKey =
+      duration && !isNaN(Number(duration))
+        ? Math.round(Number(duration))
+        : 'nodur';
+    const cacheKey = `lyrics:${cleanArtist.toLowerCase()}:${clearTrackName.toLowerCase()}:${cacheDurationKey}`;
+    const cached = this.memoryCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
+
+    const params: Record<string, any> = {
+      track_name: clearTrackName,
+      artist_name: cleanArtist,
+    };
+    if (duration && !isNaN(Number(duration))) {
+      params.duration = Math.round(Number(duration));
+    }
+
+    const baseUrl =
+      this.configService.lrcLibUrl || 'https://lrclib.net/api/get';
+
     try {
-      const response = await axios.get(
-        this.configService.lrcLibUrl || 'https://lrclib.net/api/get',
-        {
-          params: {
-            track_name: clearTrackName,
-            artist_name: cleanArtist,
-          },
-        },
-      );
-      console.log('Lyrics fetched:', response.data);
+      const response = await axios.get(baseUrl, { params });
+      if (response.data) {
+        this.memoryCache.set(cacheKey, {
+          data: response.data,
+          expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
       return response.data;
     } catch (error: any) {
       if (axios.isAxiosError(error)) {
         if (error.response?.status === 404) {
+          try {
+            const searchUrl = baseUrl.endsWith('/get')
+              ? baseUrl.slice(0, -4) + '/search'
+              : 'https://lrclib.net/api/search';
+
+            const searchRes = await axios.get(searchUrl, {
+              params: {
+                track_name: clearTrackName,
+                artist_name: cleanArtist,
+              },
+            });
+
+            if (Array.isArray(searchRes.data) && searchRes.data.length > 0) {
+              const items = searchRes.data;
+              let match = null;
+
+              if (duration && !isNaN(Number(duration))) {
+                const targetDuration = Math.round(Number(duration));
+                match = items.find(
+                  (it: any) =>
+                    it.syncedLyrics &&
+                    Math.abs(Math.round(it.duration) - targetDuration) <= 3,
+                );
+              }
+
+              if (!match) {
+                match = items.find((it: any) => Boolean(it.syncedLyrics));
+              }
+
+              if (!match) {
+                match = items[0];
+              }
+
+              if (match) {
+                this.memoryCache.set(cacheKey, {
+                  data: match,
+                  expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+                });
+                return match;
+              }
+            }
+          } catch {
+            // Ignorar y continuar a NotFoundException
+          }
           throw new NotFoundException('Lyrics not found');
         }
         throw new BadGatewayException(

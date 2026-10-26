@@ -162,7 +162,9 @@ export class YoutubeController {
   async getLyrics(
     @Query('track_name') track_name: string,
     @Query('artist_name') artist_name: string,
+    @Query('duration') duration?: string,
   ) {
-    return this.youtubeService.getLyrics(track_name, artist_name);
+    const dur = duration ? Number(duration) : undefined;
+    return this.youtubeService.getLyrics(track_name, artist_name, dur);
   }
 }

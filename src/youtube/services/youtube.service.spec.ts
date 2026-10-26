@@ -227,6 +227,21 @@ describe('YoutubeService', () => {
       });
     });
 
+    it('should clean bracketed suffixes and include duration in params when provided', async () => {
+      const mockData = { id: 2, plainLyrics: 'test', syncedLyrics: '[00:01.00] test' };
+      vi.mocked(axios.get).mockResolvedValueOnce({ data: mockData } as any);
+
+      const result = await service.getLyrics('Track [Official Video]', 'Artist', 210);
+      expect(result).toEqual(mockData);
+      expect(axios.get).toHaveBeenCalledWith('https://lrclib.net/api/get', {
+        params: {
+          track_name: 'Track',
+          artist_name: 'Artist',
+          duration: 210,
+        },
+      });
+    });
+
     it('should throw NotFoundException on 404', async () => {
       const error: any = new Error('Not found');
       error.isAxiosError = true;

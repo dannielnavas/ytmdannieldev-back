@@ -29,6 +29,9 @@ export class Track {
   @Column({ type: 'text', nullable: true })
   thumbnailUrl: string;
 
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  album?: string;
+
   @CreateDateColumn()
   createdAt: Date;
 
