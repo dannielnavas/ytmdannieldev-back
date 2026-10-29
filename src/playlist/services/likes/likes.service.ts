@@ -5,6 +5,8 @@ import { Repository } from 'typeorm';
 import { Track } from '../../entities/track.entity.js';
 import { GetLikesQueryDto, ToggleLikeDto } from '../../dtos/like.dto.js';
 import { YoutubeService } from '../../../youtube/services/youtube.service.js';
+import { SponsorblockService } from '../../../sponsorblock/services/sponsorblock.service.js';
+import type { SponsorBlockSegment } from '../../../sponsorblock/interfaces/sponsorblock.interface.js';
 
 export type YoutubeTrackInput = ToggleLikeDto;
 
@@ -17,7 +19,21 @@ export class LikesService {
     private readonly trackRepo: Repository<Track>,
     @Optional()
     private readonly youtubeService?: YoutubeService,
+    @Optional()
+    private readonly sponsorblockService?: SponsorblockService,
   ) {}
+
+  private async enrichTracks<T extends Record<string, any>>(
+    tracks: T[],
+  ): Promise<Array<T & { skipSegments: SponsorBlockSegment[] }>> {
+    if (!Array.isArray(tracks) || tracks.length === 0) {
+      return [];
+    }
+    if (this.sponsorblockService) {
+      return this.sponsorblockService.enrichTracksWithSegments(tracks);
+    }
+    return tracks.map((t) => ({ ...t, skipSegments: [] }));
+  }
 
   // 1. Toggle: Da like si no existe, lo elimina si ya existía
   async toggleLike(
@@ -103,8 +119,9 @@ export class LikesService {
       qb.skip((page - 1) * limit).take(limit);
 
       const [likes, total] = await qb.getManyAndCount();
+      const tracks = await this.enrichTracks(likes.map((like) => like.track));
       return {
-        data: likes.map((like) => like.track),
+        data: tracks,
         meta: {
           total,
           page,
@@ -115,7 +132,7 @@ export class LikesService {
     }
 
     const likes = await qb.getMany();
-    return likes.map((like) => like.track);
+    return this.enrichTracks(likes.map((like) => like.track));
   }
 
   // 3. Chequear estado para la canción actual
@@ -172,7 +189,7 @@ export class LikesService {
       take: safeLimit,
     });
 
-    return likes.map((like) => like.track);
+    return this.enrichTracks(likes.map((like) => like.track));
   }
 
   // 6. Radio / Mix basado en canciones guardadas
@@ -217,7 +234,7 @@ export class LikesService {
               .slice(0, safeLimit);
 
             if (list.length > 0) {
-              return list;
+              return this.enrichTracks(list);
             }
           }
         }
@@ -227,10 +244,12 @@ export class LikesService {
     }
 
     // Fallback: aleatorizar las canciones con like del usuario
-    return likes
+    const fallbackTracks = likes
       .map((l) => l.track)
       .sort(() => Math.random() - 0.5)
       .slice(0, safeLimit);
+
+    return this.enrichTracks(fallbackTracks);
   }
 
   // 7. Conteo rápido de likes
@@ -295,6 +314,6 @@ export class LikesService {
       take: limit,
     });
 
-    return likes.map((like) => like.track);
+    return this.enrichTracks(likes.map((like) => like.track));
   }
 }

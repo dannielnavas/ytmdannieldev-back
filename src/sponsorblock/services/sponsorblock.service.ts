@@ -166,6 +166,76 @@ export class SponsorblockService {
   }
 
   /**
+   * Safely fetches skip segments for a video ID without throwing exceptions.
+   * Always returns an array (empty if not found or on error).
+   */
+  async getSkipSegmentsSafe(
+    videoId?: string | null,
+    query?: Partial<GetSkipSegmentsQueryDto>,
+  ): Promise<SponsorBlockSegment[]> {
+    if (!videoId || typeof videoId !== 'string') {
+      return [];
+    }
+    const cleanId = this.cleanVideoId(videoId);
+    if (!cleanId) {
+      return [];
+    }
+    try {
+      return await this.getSkipSegments(cleanId, query);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Enriches a list of track/song objects with their SponsorBlock `skipSegments`
+   * using controlled concurrency and in-memory caching.
+   */
+  async enrichTracksWithSegments<T extends Record<string, any>>(
+    tracks: T[],
+    concurrency = 8,
+  ): Promise<Array<T & { skipSegments: SponsorBlockSegment[] }>> {
+    if (!Array.isArray(tracks) || tracks.length === 0) {
+      return [];
+    }
+
+    const extractId = (item: Record<string, any>): string => {
+      const raw = item?.videoId ?? item?.youtubeId ?? item?.video_id ?? '';
+      return typeof raw === 'string' ? this.cleanVideoId(raw) : '';
+    };
+
+    const uniqueIds = Array.from(
+      new Set(tracks.map(extractId).filter((id) => Boolean(id))),
+    );
+
+    const segmentsMap = new Map<string, SponsorBlockSegment[]>();
+
+    if (uniqueIds.length > 0) {
+      const workerCount = Math.max(1, Math.min(concurrency, uniqueIds.length));
+      let index = 0;
+
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (index < uniqueIds.length) {
+          const currentIndex = index++;
+          const id = uniqueIds[currentIndex];
+          const segments = await this.getSkipSegmentsSafe(id);
+          segmentsMap.set(id, segments);
+        }
+      });
+
+      await Promise.all(workers);
+    }
+
+    return tracks.map((track) => {
+      const cleanId = extractId(track);
+      return {
+        ...track,
+        skipSegments: cleanId ? (segmentsMap.get(cleanId) ?? []) : [],
+      };
+    });
+  }
+
+  /**
    * Fetches segments by SHA-256 hash prefix for high privacy.
    */
   async getSkipSegmentsByHashPrefix(

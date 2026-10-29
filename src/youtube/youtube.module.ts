@@ -7,10 +7,12 @@ import { YoutubeController } from './controller/youtube.controller.js';
 import { YoutubeService } from './services/youtube.service.js';
 import { UsersModule } from '../users/users.module.js';
 import { YoutubeCache } from './entities/youtube-cache.entity.js';
+import { SponsorblockModule } from '../sponsorblock/sponsorblock.module.js';
 
 @Module({
   imports: [
     UsersModule,
+    SponsorblockModule,
     TypeOrmModule.forFeature([YoutubeCache]),
     JwtModule.registerAsync({
       inject: [config.KEY],

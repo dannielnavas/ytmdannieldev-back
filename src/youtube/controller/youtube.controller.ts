@@ -55,9 +55,11 @@ export class YoutubeController {
     // Si el cliente solicita JSON (ej. HttpClient de Angular desde _dashboard.stream)
     const acceptHeader = (req.headers as any)?.['accept'] || '';
     if (acceptHeader.includes('application/json')) {
+      const skipSegments = await this.youtubeService.getSkipSegments(id);
       res.json({
         videoId: id,
         streamUrl: `/youtube/stream/${id}`,
+        skipSegments,
       });
       return;
     }

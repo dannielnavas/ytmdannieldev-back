@@ -6,12 +6,15 @@ import {
   InternalServerErrorException,
   NotFoundException,
   OnModuleInit,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { UsersService } from '../../users/services/users/users.service.js';
 import { YoutubeCache } from '../entities/youtube-cache.entity.js';
+import { SponsorblockService } from '../../sponsorblock/services/sponsorblock.service.js';
+import type { SponsorBlockSegment } from '../../sponsorblock/interfaces/sponsorblock.interface.js';
 import YTMusic from 'ytmusic-api';
 
 import crypto from 'crypto';
@@ -51,7 +54,66 @@ export class YoutubeService implements OnModuleInit {
     private readonly configService: ConfigType<typeof config>,
     @InjectRepository(YoutubeCache)
     private readonly youtubeCacheRepository: Repository<YoutubeCache>,
+    @Optional()
+    private readonly sponsorblockService?: SponsorblockService,
   ) {}
+
+  async getSkipSegments(videoId: string): Promise<SponsorBlockSegment[]> {
+    if (!this.sponsorblockService) {
+      return [];
+    }
+    return this.sponsorblockService.getSkipSegmentsSafe(videoId);
+  }
+
+  async enrichSongs<T extends Record<string, any>>(
+    songs: T[],
+  ): Promise<Array<T & { skipSegments: SponsorBlockSegment[] }>> {
+    if (!Array.isArray(songs) || songs.length === 0) {
+      return [];
+    }
+    if (this.sponsorblockService) {
+      return this.sponsorblockService.enrichTracksWithSegments(songs);
+    }
+    return songs.map((s) => ({ ...s, skipSegments: [] }));
+  }
+
+  private async enrichDashboardSections(sections: any[]): Promise<any[]> {
+    if (!Array.isArray(sections) || sections.length === 0) {
+      return [];
+    }
+
+    const songRefs: Array<{
+      secIdx: number;
+      itemIdx: number;
+      song: Record<string, any>;
+    }> = [];
+
+    sections.forEach((sec, secIdx) => {
+      if (Array.isArray(sec?.contents)) {
+        sec.contents.forEach((item: any, itemIdx: number) => {
+          if (item && (item.type === 'SONG' || item.type === 'VIDEO' || item.videoId)) {
+            songRefs.push({ secIdx, itemIdx, song: item });
+          }
+        });
+      }
+    });
+
+    if (songRefs.length === 0) {
+      return sections;
+    }
+
+    const enrichedSongs = await this.enrichSongs(songRefs.map((r) => r.song));
+    const clonedSections = sections.map((sec) => ({
+      ...sec,
+      contents: Array.isArray(sec.contents) ? [...sec.contents] : [],
+    }));
+
+    songRefs.forEach((ref, idx) => {
+      clonedSections[ref.secIdx].contents[ref.itemIdx] = enrichedSongs[idx];
+    });
+
+    return clonedSections;
+  }
 
   async getAuthedInnertubeByCookie(
     cookieStr: string,
@@ -426,20 +488,22 @@ export class YoutubeService implements OnModuleInit {
         );
       }
 
+      const enrichedSections = await this.enrichDashboardSections(finalSections);
+
       // 6. Guardar en caché de base de datos y memoria
       const ttlHours = this.configService.youtubeCacheTtlHours || 6;
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
 
       try {
         if (existingCache) {
-          existingCache.data = finalSections;
+          existingCache.data = enrichedSections;
           existingCache.expires_at = expiresAt;
           await this.youtubeCacheRepository.save(existingCache);
         } else {
           const newCache = this.youtubeCacheRepository.create({
             user_id: userId,
             cache_key: 'dashboard',
-            data: finalSections,
+            data: enrichedSections,
             expires_at: expiresAt,
           });
           await this.youtubeCacheRepository.save(newCache);
@@ -449,11 +513,11 @@ export class YoutubeService implements OnModuleInit {
       }
 
       this.memoryCache.set(memoryKey, {
-        data: finalSections,
+        data: enrichedSections,
         expiresAt: expiresAt.getTime(),
       });
 
-      return finalSections;
+      return enrichedSections;
     } catch (error) {
       console.error('Error fetching YouTube Music dashboard:', error);
 
@@ -539,6 +603,11 @@ export class YoutubeService implements OnModuleInit {
         const pl = await recap.getPlaylist();
         if (pl && pl.contents?.length) {
           recapPlaylist = this.formatInnertubePlaylist('recap', pl);
+          if (recapPlaylist?.songsList?.length) {
+            recapPlaylist.songsList = await this.enrichSongs(
+              recapPlaylist.songsList,
+            );
+          }
         }
       } catch {
         // Normal si no hay playlist de highlights lista
@@ -635,10 +704,13 @@ export class YoutubeService implements OnModuleInit {
   }
 
   async search(query: string) {
-    const songs = await this.ytmusic.searchSongs(query); // title, artist, album, duration, thumbnail...
-    const playlists = await this.ytmusic.searchPlaylists(query);
-    const artists = await this.ytmusic.searchArtists(query);
-    const albums = await this.ytmusic.searchAlbums(query);
+    const [rawSongs, playlists, artists, albums] = await Promise.all([
+      this.ytmusic.searchSongs(query), // title, artist, album, duration, thumbnail...
+      this.ytmusic.searchPlaylists(query),
+      this.ytmusic.searchArtists(query),
+      this.ytmusic.searchAlbums(query),
+    ]);
+    const songs = await this.enrichSongs(rawSongs);
     return { songs, playlists, artists, albums };
   }
 
@@ -728,7 +800,10 @@ export class YoutubeService implements OnModuleInit {
   }
 
   async getMetadata(videoId: string) {
-    const info = await this.yt.getInfo(videoId);
+    const [info, skipSegments] = await Promise.all([
+      this.yt.getInfo(videoId),
+      this.getSkipSegments(videoId),
+    ]);
 
     return {
       title: info.basic_info.title,
@@ -737,6 +812,7 @@ export class YoutubeService implements OnModuleInit {
       channel: info.basic_info.channel?.name,
       author: info.basic_info.author,
       viewCount: info.basic_info.view_count,
+      skipSegments,
     };
   }
 
@@ -855,6 +931,20 @@ export class YoutubeService implements OnModuleInit {
     };
   }
 
+  private async cacheAndReturnPlaylist(
+    cacheKey: string,
+    result: { infoPlaylist: any; songsList: any[] },
+  ) {
+    if (Array.isArray(result.songsList) && result.songsList.length > 0) {
+      result.songsList = await this.enrichSongs(result.songsList);
+    }
+    this.playlistCache.set(cacheKey, {
+      data: result,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    });
+    return result;
+  }
+
   async viewPlaylist(playlistId: string, userId?: number) {
     if (!playlistId || typeof playlistId !== 'string') {
       throw new BadRequestException('playlistId is required');
@@ -892,11 +982,7 @@ export class YoutubeService implements OnModuleInit {
             const pl = await recap.getPlaylist().catch(() => null);
             if (pl && pl.contents?.length) {
               const result = this.formatInnertubePlaylist(rawId, pl);
-              this.playlistCache.set(cacheKey, {
-                data: result,
-                expiresAt: Date.now() + 5 * 60 * 1000,
-              });
-              return result;
+              return this.cacheAndReturnPlaylist(cacheKey, result);
             }
           }
         }
@@ -913,11 +999,7 @@ export class YoutubeService implements OnModuleInit {
         if (pl && (pl.contents?.length || pl.header)) {
           const result = this.formatInnertubePlaylist(rawId, pl);
           if (result.songsList.length > 0) {
-            this.playlistCache.set(cacheKey, {
-              data: result,
-              expiresAt: Date.now() + 5 * 60 * 1000,
-            });
-            return result;
+            return this.cacheAndReturnPlaylist(cacheKey, result);
           }
         }
       } catch (err) {
@@ -993,11 +1075,7 @@ export class YoutubeService implements OnModuleInit {
             songsList,
           };
 
-          this.playlistCache.set(cacheKey, {
-            data: result,
-            expiresAt: Date.now() + 5 * 60 * 1000,
-          });
-          return result;
+          return this.cacheAndReturnPlaylist(cacheKey, result);
         }
       } catch (error) {
         console.warn('Error resolving video radio mix via upNext:', error);
@@ -1045,30 +1123,18 @@ export class YoutubeService implements OnModuleInit {
 
     let result = await tryMusicPlaylist(cleanId);
     if (result) {
-      this.playlistCache.set(cacheKey, {
-        data: result,
-        expiresAt: Date.now() + 5 * 60 * 1000,
-      });
-      return result;
+      return this.cacheAndReturnPlaylist(cacheKey, result);
     }
 
     if (!cleanId.startsWith('VL')) {
       result = await tryMusicPlaylist('VL' + cleanId);
       if (result) {
-        this.playlistCache.set(cacheKey, {
-          data: result,
-          expiresAt: Date.now() + 5 * 60 * 1000,
-        });
-        return result;
+        return this.cacheAndReturnPlaylist(cacheKey, result);
       }
     } else {
       result = await tryMusicPlaylist(cleanId.slice(2));
       if (result) {
-        this.playlistCache.set(cacheKey, {
-          data: result,
-          expiresAt: Date.now() + 5 * 60 * 1000,
-        });
-        return result;
+        return this.cacheAndReturnPlaylist(cacheKey, result);
       }
     }
 
@@ -1098,11 +1164,7 @@ export class YoutubeService implements OnModuleInit {
             })),
           };
 
-          this.playlistCache.set(cacheKey, {
-            data: albumResult,
-            expiresAt: Date.now() + 5 * 60 * 1000,
-          });
-          return albumResult;
+          return this.cacheAndReturnPlaylist(cacheKey, albumResult);
         }
       } catch {}
     }
@@ -1155,11 +1217,7 @@ export class YoutubeService implements OnModuleInit {
             songsList,
           };
 
-          this.playlistCache.set(cacheKey, {
-            data: generalResult,
-            expiresAt: Date.now() + 5 * 60 * 1000,
-          });
-          return generalResult;
+          return this.cacheAndReturnPlaylist(cacheKey, generalResult);
         }
       }
     } catch {}
@@ -1176,11 +1234,7 @@ export class YoutubeService implements OnModuleInit {
         songsList: songsOfThePlaylist,
       };
 
-      this.playlistCache.set(cacheKey, {
-        data: ytmResult,
-        expiresAt: Date.now() + 5 * 60 * 1000,
-      });
-      return ytmResult;
+      return this.cacheAndReturnPlaylist(cacheKey, ytmResult);
     } catch {}
 
     throw new NotFoundException(
@@ -1189,7 +1243,11 @@ export class YoutubeService implements OnModuleInit {
   }
 
   async viewAlbum(albumId: string) {
-    return this.ytmusic.getAlbum(albumId);
+    const album: any = await this.ytmusic.getAlbum(albumId);
+    if (album && Array.isArray(album.songs) && album.songs.length > 0) {
+      album.songs = await this.enrichSongs(album.songs);
+    }
+    return album;
   }
 
   async getLyrics(

@@ -7,6 +7,7 @@ import {
   OneToMany,
 } from 'typeorm';
 import { UserLike } from './user-like.entity.js';
+import type { SponsorBlockSegment } from '../../sponsorblock/interfaces/sponsorblock.interface.js';
 
 @Entity('tracks')
 export class Track {
@@ -37,4 +38,6 @@ export class Track {
 
   @OneToMany(() => UserLike, (like) => like.track)
   likes: UserLike[];
+
+  skipSegments?: SponsorBlockSegment[];
 }
