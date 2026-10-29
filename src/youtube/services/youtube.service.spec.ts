@@ -496,4 +496,78 @@ describe('YoutubeService', () => {
       expect(result.message).toContain('no está disponible');
     });
   });
+
+  describe('SponsorBlock integration', () => {
+    it('should include skipSegments in getMetadata', async () => {
+      const mockSegments = [
+        {
+          UUID: 'sb-1',
+          segment: [5, 15],
+          category: 'music_offtopic',
+          actionType: 'skip',
+          locked: 0,
+          votes: 10,
+          videoDuration: 200,
+          description: '',
+        },
+      ];
+      (service as any).yt = {
+        getInfo: vi.fn().mockResolvedValue({
+          basic_info: {
+            title: 'Test Track',
+            duration: 200,
+            thumbnail: [{ url: 'http://img.jpg' }],
+            channel: { name: 'Channel' },
+            author: 'Author',
+            view_count: 1000,
+          },
+        }),
+      };
+      (service as any).sponsorblockService = {
+        getSkipSegmentsSafe: vi.fn().mockResolvedValue(mockSegments),
+      };
+
+      const meta = await service.getMetadata('vid123');
+      expect(meta.title).toBe('Test Track');
+      expect(meta.skipSegments).toEqual(mockSegments);
+    });
+
+    it('should enrich songs with skipSegments in search and viewAlbum', async () => {
+      const mockSegments = [
+        {
+          UUID: 'sb-2',
+          segment: [0, 8],
+          category: 'intro',
+          actionType: 'skip',
+          locked: 0,
+          votes: 4,
+          videoDuration: 180,
+          description: '',
+        },
+      ];
+      (service as any).ytmusic = {
+        searchSongs: vi.fn().mockResolvedValue([{ videoId: 's1', name: 'S1' }]),
+        searchPlaylists: vi.fn().mockResolvedValue([]),
+        searchArtists: vi.fn().mockResolvedValue([]),
+        searchAlbums: vi.fn().mockResolvedValue([]),
+        getAlbum: vi.fn().mockResolvedValue({
+          name: 'Album 1',
+          songs: [{ videoId: 's1', name: 'S1' }],
+        }),
+      };
+      (service as any).sponsorblockService = {
+        enrichTracksWithSegments: vi
+          .fn()
+          .mockImplementation(async (tracks: any[]) =>
+            tracks.map((t) => ({ ...t, skipSegments: mockSegments })),
+          ),
+      };
+
+      const searchRes = await service.search('query');
+      expect(searchRes.songs[0].skipSegments).toEqual(mockSegments);
+
+      const albumRes = await service.viewAlbum('alb1');
+      expect(albumRes.songs[0].skipSegments).toEqual(mockSegments);
+    });
+  });
 });

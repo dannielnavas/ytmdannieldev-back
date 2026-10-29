@@ -272,4 +272,41 @@ describe('SponsorblockService', () => {
       );
     });
   });
+
+  describe('getSkipSegmentsSafe & enrichTracksWithSegments', () => {
+    it('should return empty array when getSkipSegmentsSafe fails or videoId is empty', async () => {
+      expect(await service.getSkipSegmentsSafe('')).toEqual([]);
+      vi.mocked(axios.get).mockRejectedValueOnce(new Error('Network error'));
+      expect(await service.getSkipSegmentsSafe('errVideo')).toEqual([]);
+    });
+
+    it('should enrich tracks with deduplicated skipSegments concurrently', async () => {
+      const mockSegments = [
+        {
+          UUID: 'seg-1',
+          segment: [0, 12] as [number, number],
+          category: 'intro',
+          actionType: 'skip',
+          locked: 0,
+          votes: 3,
+          videoDuration: 200,
+          description: '',
+        },
+      ];
+      vi.mocked(axios.get).mockResolvedValueOnce({ data: mockSegments } as any);
+
+      const tracks = [
+        { videoId: 'vidA', name: 'Song A' },
+        { youtubeId: 'vidA', name: 'Song A Dup' },
+        { name: 'No Video ID' },
+      ];
+
+      const enriched = await service.enrichTracksWithSegments(tracks);
+      expect(enriched).toHaveLength(3);
+      expect(enriched[0].skipSegments).toEqual(mockSegments);
+      expect(enriched[1].skipSegments).toEqual(mockSegments);
+      expect(enriched[2].skipSegments).toEqual([]);
+      expect(axios.get).toHaveBeenCalledTimes(1);
+    });
+  });
 });

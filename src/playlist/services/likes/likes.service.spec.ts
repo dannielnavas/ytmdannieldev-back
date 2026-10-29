@@ -109,7 +109,10 @@ describe('LikesService', () => {
 
       const res = await service.getUserLikedTracks(1);
       expect(Array.isArray(res)).toBe(true);
-      expect(res).toEqual([{ id: '1', title: 'Song 1' }, { id: '2', title: 'Song 2' }]);
+      expect(res).toEqual([
+        { id: '1', title: 'Song 1', skipSegments: [] },
+        { id: '2', title: 'Song 2', skipSegments: [] },
+      ]);
     });
 
     it('should return paginated data with meta when page or limit is provided', async () => {
@@ -156,7 +159,9 @@ describe('LikesService', () => {
       ]);
 
       const res = await service.getForgottenLikes(1, 5);
-      expect(res).toEqual([{ id: 'track-old', title: 'Old Song' }]);
+      expect(res).toEqual([
+        { id: 'track-old', title: 'Old Song', skipSegments: [] },
+      ]);
     });
   });
 });

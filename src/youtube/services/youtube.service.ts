@@ -971,7 +971,6 @@ export class YoutubeService implements OnModuleInit {
         authedYt = await this.getAuthedInnertubeByCookie(fallbackCookie);
       }
     }
-    const yt = await this.ensureInnertube();
 
     // Soporte especial para "recap" o "FEmusic_listening_review"
     if (rawId === 'recap' || rawId === 'FEmusic_listening_review') {
@@ -990,6 +989,8 @@ export class YoutubeService implements OnModuleInit {
         console.warn('Error resolving recap as playlist:', err);
       }
     }
+
+    const yt = await this.ensureInnertube();
 
     // Soporte especial para Liked Music: "VLLM" o "LM"
     if (rawId === 'VLLM' || rawId === 'LM') {
