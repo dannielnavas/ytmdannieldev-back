@@ -746,6 +746,7 @@ export class YoutubeService implements OnModuleInit {
           }
           if (format) {
             this.yt = yt;
+            (format as any)._chosenClient = client || 'default';
             return format;
           } else {
             errors[client || 'default'] =
@@ -783,6 +784,7 @@ export class YoutubeService implements OnModuleInit {
                 }
                 if (format) {
                   this.yt = authedYt;
+                  (format as any)._chosenClient = `authed_${client}`;
                   return format;
                 }
               }
