@@ -97,6 +97,7 @@ export class YoutubeController {
 
       const upstream = await fetch(`${url}&cpn=${cpn}`, { headers });
       if (!upstream.ok && upstream.status !== 206) {
+        console.warn(`Upstream audio fetch error for video ${id}: status=${upstream.status}`);
         res.status(upstream.status || 502).end();
         return;
       }

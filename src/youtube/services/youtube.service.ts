@@ -91,7 +91,10 @@ export class YoutubeService implements OnModuleInit {
     sections.forEach((sec, secIdx) => {
       if (Array.isArray(sec?.contents)) {
         sec.contents.forEach((item: any, itemIdx: number) => {
-          if (item && (item.type === 'SONG' || item.type === 'VIDEO' || item.videoId)) {
+          if (
+            item &&
+            (item.type === 'SONG' || item.type === 'VIDEO' || item.videoId)
+          ) {
             songRefs.push({ secIdx, itemIdx, song: item });
           }
         });
@@ -488,7 +491,8 @@ export class YoutubeService implements OnModuleInit {
         );
       }
 
-      const enrichedSections = await this.enrichDashboardSections(finalSections);
+      const enrichedSections =
+        await this.enrichDashboardSections(finalSections);
 
       // 6. Guardar en caché de base de datos y memoria
       const ttlHours = this.configService.youtubeCacheTtlHours || 6;
@@ -717,37 +721,47 @@ export class YoutubeService implements OnModuleInit {
   async getAudioStream(videoId: string): Promise<Misc.Format> {
     const cleanId = videoId.replace(/^RDAM(?:VM|PL)/, '');
 
-    // 1. Intentar con cookies del usuario (YTMUSIC) para evitar bloqueos por IP de datacenter en Vercel
+    // 1. Intentar con cookies del usuario para evitar bloqueos por IP de datacenter en Vercel
     try {
       const rawCookie = await this.usersService.findFirstYoutubeCookie();
       if (rawCookie) {
         const authedYt = await this.getAuthedInnertubeByCookie(rawCookie);
         if (authedYt) {
-          const info = await authedYt.getBasicInfo(cleanId, {
-            client: 'YTMUSIC',
-          } as any);
-          if (info.streaming_data) {
-            let format = info.chooseFormat({ type: 'audio', quality: 'best' });
-            if (!format) {
-              const audioFormats = (
-                info.streaming_data?.adaptive_formats || []
-              ).filter((f) => f.mime_type?.includes('audio'));
-              if (audioFormats.length > 0) {
-                format = audioFormats[0];
+          const authedClients = ['VISIONOS', 'ANDROID_VR', 'YTMUSIC', 'IOS'];
+          for (const client of authedClients) {
+            try {
+              const info = await authedYt.getBasicInfo(cleanId, {
+                client,
+              } as any);
+              if (info.streaming_data) {
+                let format = info.chooseFormat({
+                  type: 'audio',
+                  quality: 'best',
+                });
+                if (!format) {
+                  const audioFormats = (
+                    info.streaming_data?.adaptive_formats || []
+                  ).filter((f) => f.mime_type?.includes('audio'));
+                  if (audioFormats.length > 0) {
+                    format = audioFormats[0];
+                  }
+                }
+                if (format) {
+                  this.yt = authedYt;
+                  return format;
+                }
               }
-            }
-            if (format) {
-              this.yt = authedYt;
-              return format;
+            } catch {
+              // intentar siguiente cliente
             }
           }
         }
       }
     } catch (err) {
-      console.warn('Fallo stream autenticado con YTMUSIC:', err);
+      console.warn('Fallo stream autenticado:', err);
     }
 
-    // 2. Fallback sin cookies utilizando clientes móviles
+    // 2. Fallback sin cookies utilizando clientes móviles/modernos
     if (!this.yt) {
       this.yt = await Innertube.create({
         cache: new UniversalCache(false),
@@ -757,12 +771,13 @@ export class YoutubeService implements OnModuleInit {
     }
 
     const clients: (string | undefined)[] = [
+      'VISIONOS',
+      'ANDROID_VR',
       'IOS',
       'ANDROID',
       'TV_EMBEDDED',
       'WEB_EMBEDDED',
       undefined,
-      'VISIONOS',
     ];
 
     const errors: Record<string, string> = {};
@@ -1251,11 +1266,7 @@ export class YoutubeService implements OnModuleInit {
     return album;
   }
 
-  async getLyrics(
-    track_name: string,
-    artist_name: string,
-    duration?: number,
-  ) {
+  async getLyrics(track_name: string, artist_name: string, duration?: number) {
     if (!track_name) {
       throw new BadRequestException(`track_name is required`);
     }
