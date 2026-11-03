@@ -91,10 +91,7 @@ export class YoutubeService implements OnModuleInit {
     sections.forEach((sec, secIdx) => {
       if (Array.isArray(sec?.contents)) {
         sec.contents.forEach((item: any, itemIdx: number) => {
-          if (
-            item &&
-            (item.type === 'SONG' || item.type === 'VIDEO' || item.videoId)
-          ) {
+          if (item && (item.type === 'SONG' || item.type === 'VIDEO' || item.videoId)) {
             songRefs.push({ secIdx, itemIdx, song: item });
           }
         });
@@ -491,8 +488,7 @@ export class YoutubeService implements OnModuleInit {
         );
       }
 
-      const enrichedSections =
-        await this.enrichDashboardSections(finalSections);
+      const enrichedSections = await this.enrichDashboardSections(finalSections);
 
       // 6. Guardar en caché de base de datos y memoria
       const ttlHours = this.configService.youtubeCacheTtlHours || 6;
@@ -734,10 +730,7 @@ export class YoutubeService implements OnModuleInit {
                 client,
               } as any);
               if (info.streaming_data) {
-                let format = info.chooseFormat({
-                  type: 'audio',
-                  quality: 'best',
-                });
+                let format = info.chooseFormat({ type: 'audio', quality: 'best' });
                 if (!format) {
                   const audioFormats = (
                     info.streaming_data?.adaptive_formats || []
@@ -1266,7 +1259,11 @@ export class YoutubeService implements OnModuleInit {
     return album;
   }
 
-  async getLyrics(track_name: string, artist_name: string, duration?: number) {
+  async getLyrics(
+    track_name: string,
+    artist_name: string,
+    duration?: number,
+  ) {
     if (!track_name) {
       throw new BadRequestException(`track_name is required`);
     }
