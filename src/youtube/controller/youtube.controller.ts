@@ -80,9 +80,10 @@ export class YoutubeController {
   private async pipeAudioStream(id: string, req: Request, res: any) {
     try {
       const format = await this.youtubeService.getAudioStream(id);
-      const url =
-        format.url ??
-        (await format.decipher(this.youtubeService.yt.session.player));
+      const player =
+        (format as any)._innertube?.session?.player ||
+        this.youtubeService.yt?.session?.player;
+      const url = await format.decipher(player);
       const cpn = Utils.generateRandomString(16);
 
       const headers: Record<string, string> = {
@@ -103,12 +104,10 @@ export class YoutubeController {
           `Upstream audio fetch error for video ${id}: status=${upstream.status}, client=${chosenClient}, body=${upstreamText}`,
         );
         res.status(upstream.status || 502).json({
-          statusCode: upstream.status,
+          statusCode: upstream.status || 502,
           message: 'Upstream audio fetch error',
           client: chosenClient,
-          step1Errors: (format as any)?._step1Errors,
           upstreamBody: upstreamText.slice(0, 500),
-          headersSent: headers,
         });
         return;
       }

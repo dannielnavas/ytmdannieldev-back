@@ -134,11 +134,23 @@ export class YoutubeService implements OnModuleInit {
 
     try {
       Platform.shim.eval = async (data: any) => new Function(data.output)();
+      const customFetch = async (input: any, init: any) => {
+        const url = input?.url || input?.href || String(input);
+        if (url.includes('/player')) {
+          const h = new Headers(init?.headers);
+          h.delete('authorization');
+          h.delete('x-goog-authuser');
+          return fetch(input, { ...init, headers: h });
+        }
+        return fetch(input, init);
+      };
+
       const client = await Innertube.create({
         cache: new UniversalCache(false),
         cookie: cleanCookie,
         location: 'CO',
         lang: 'es',
+        fetch: customFetch,
       });
       this.authedInnertubeCache.set(cookieHash, {
         client,
@@ -716,9 +728,63 @@ export class YoutubeService implements OnModuleInit {
 
   async getAudioStream(videoId: string): Promise<Misc.Format> {
     const cleanId = videoId.replace(/^RDAM(?:VM|PL)/, '');
-    const yt = await this.ensureInnertube();
+    const errors: Record<string, string> = {};
 
-    // 1. Clientes públicos modernos (VISIONOS y ANDROID_VR permiten streaming completo sin 403 ni límite de 1MB)
+    // 1. Si hay cookies de usuario (ej. Vercel con IP de datacenter), usarlas primero con clientes móviles (VISIONOS / ANDROID_VR / IOS)
+    try {
+      const rawCookie = await this.usersService.findFirstYoutubeCookie();
+      if (rawCookie) {
+        const authedYt = await this.getAuthedInnertubeByCookie(rawCookie);
+        if (authedYt) {
+          const authedClients = [
+            'VISIONOS',
+            'ANDROID_VR',
+            'IOS',
+            'YTMUSIC',
+            'WEB',
+          ];
+          for (const client of authedClients) {
+            try {
+              const info = await authedYt.getBasicInfo(cleanId, {
+                client,
+              } as any);
+              if (info.streaming_data) {
+                let format = info.chooseFormat({
+                  type: 'audio',
+                  quality: 'best',
+                });
+                if (!format) {
+                  const audioFormats = (
+                    info.streaming_data?.adaptive_formats || []
+                  ).filter((f) => f.mime_type?.includes('audio'));
+                  if (audioFormats.length > 0) {
+                    format = audioFormats[0];
+                  }
+                }
+                if (format) {
+                  (format as any)._chosenClient = `authed_${client}`;
+                  (format as any)._innertube = authedYt;
+                  return format;
+                } else {
+                  errors[`authed_${client}`] =
+                    'streaming_data present but no audio format found';
+                }
+              } else {
+                errors[`authed_${client}`] =
+                  `no streaming_data (status=${info.playability_status?.status}, reason=${info.playability_status?.reason})`;
+              }
+            } catch (err: any) {
+              errors[`authed_${client}`] = err?.message || String(err);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Fallo intento autenticado de stream:', err);
+    }
+
+    // 2. Fallback sin cookies utilizando clientes modernos (útil en local donde no hay restricción de IP de datacenter)
+    const yt = await this.ensureInnertube();
     const clients: (string | undefined)[] = [
       'VISIONOS',
       'ANDROID_VR',
@@ -729,7 +795,6 @@ export class YoutubeService implements OnModuleInit {
       undefined,
     ];
 
-    const errors: Record<string, string> = {};
     for (const client of clients) {
       try {
         const opts: any = client ? { client } : {};
@@ -745,58 +810,20 @@ export class YoutubeService implements OnModuleInit {
             }
           }
           if (format) {
-            this.yt = yt;
             (format as any)._chosenClient = client || 'default';
+            (format as any)._innertube = yt;
             return format;
           } else {
             errors[client || 'default'] =
               'streaming_data present but no audio format found';
           }
         } else {
-          errors[client || 'default'] = 'no streaming_data';
+          errors[client || 'default'] =
+            `no streaming_data (status=${info.playability_status?.status}, reason=${info.playability_status?.reason})`;
         }
       } catch (err: any) {
         errors[client || 'default'] = err?.message || String(err);
       }
-    }
-
-    // 2. Fallback autenticado con cookies solo si los clientes públicos fallan (ej. video con restricción de edad/login)
-    try {
-      const rawCookie = await this.usersService.findFirstYoutubeCookie();
-      if (rawCookie) {
-        const authedYt = await this.getAuthedInnertubeByCookie(rawCookie);
-        if (authedYt) {
-          const authedClients = ['YTMUSIC', 'WEB'];
-          for (const client of authedClients) {
-            try {
-              const info = await authedYt.getBasicInfo(cleanId, {
-                client,
-              } as any);
-              if (info.streaming_data) {
-                let format = info.chooseFormat({ type: 'audio', quality: 'best' });
-                if (!format) {
-                  const audioFormats = (
-                    info.streaming_data?.adaptive_formats || []
-                  ).filter((f) => f.mime_type?.includes('audio'));
-                  if (audioFormats.length > 0) {
-                    format = audioFormats[0];
-                  }
-                }
-                if (format) {
-                  this.yt = authedYt;
-                  (format as any)._chosenClient = `authed_${client}`;
-                  (format as any)._step1Errors = errors;
-                  return format;
-                }
-              }
-            } catch {
-              // intentar siguiente cliente
-            }
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('Fallo fallback autenticado:', err);
     }
 
     throw new InternalServerErrorException(
