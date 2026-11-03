@@ -39,6 +39,8 @@ export class YoutubeService implements OnModuleInit {
     string,
     { data: any; expiresAt: number }
   >();
+  private cachedVisitorData?: string;
+  private visitorYt?: Innertube;
 
   async onModuleInit() {
     Platform.shim.eval = async (data: any) => new Function(data.output)();
@@ -134,24 +136,15 @@ export class YoutubeService implements OnModuleInit {
 
     try {
       Platform.shim.eval = async (data: any) => new Function(data.output)();
-      const customFetch = async (input: any, init: any) => {
-        const url = input?.url || input?.href || String(input);
-        if (url.includes('/player')) {
-          const h = new Headers(init?.headers);
-          h.delete('authorization');
-          h.delete('x-goog-authuser');
-          return fetch(input, { ...init, headers: h });
-        }
-        return fetch(input, init);
-      };
-
       const client = await Innertube.create({
         cache: new UniversalCache(false),
         cookie: cleanCookie,
         location: 'CO',
         lang: 'es',
-        fetch: customFetch,
       });
+      if (client?.session?.context?.client?.visitorData) {
+        this.cachedVisitorData = client.session.context.client.visitorData;
+      }
       this.authedInnertubeCache.set(cookieHash, {
         client,
         expiresAt: now + 30 * 60 * 1000, // 30 minutos
@@ -161,6 +154,35 @@ export class YoutubeService implements OnModuleInit {
       console.warn('Error creating authed Innertube:', err);
       return null;
     }
+  }
+
+  private async getVisitorInnertube(): Promise<Innertube> {
+    if (this.visitorYt) {
+      return this.visitorYt;
+    }
+
+    let visitorData = this.cachedVisitorData;
+    if (!visitorData) {
+      try {
+        const rawCookie = await this.usersService.findFirstYoutubeCookie();
+        if (rawCookie) {
+          const authed = await this.getAuthedInnertubeByCookie(rawCookie);
+          visitorData = authed?.session?.context?.client?.visitorData;
+          this.cachedVisitorData = visitorData;
+        }
+      } catch (err) {
+        console.warn('Error harvesting visitorData:', err);
+      }
+    }
+
+    Platform.shim.eval = async (data: any) => new Function(data.output)();
+    this.visitorYt = await Innertube.create({
+      cache: new UniversalCache(false),
+      visitor_data: visitorData || undefined,
+      location: 'CO',
+      lang: 'es',
+    });
+    return this.visitorYt;
   }
 
   async getAuthedInnertube(userId: number): Promise<Innertube | null> {
@@ -730,19 +752,55 @@ export class YoutubeService implements OnModuleInit {
     const cleanId = videoId.replace(/^RDAM(?:VM|PL)/, '');
     const errors: Record<string, string> = {};
 
-    // 1. Si hay cookies de usuario (ej. Vercel con IP de datacenter), usarlas primero con clientes móviles (VISIONOS / ANDROID_VR / IOS)
+    // 1. Clientes móviles modernos (VISIONOS / ANDROID_VR / IOS) con visitor_data autenticado (sin SABR ni límite de 1MB)
+    try {
+      const visitorYt = await this.getVisitorInnertube();
+      const mobileClients = ['VISIONOS', 'ANDROID_VR', 'IOS'];
+      for (const client of mobileClients) {
+        try {
+          const info = await visitorYt.getBasicInfo(cleanId, {
+            client,
+          } as any);
+          if (info.streaming_data) {
+            let format = info.chooseFormat({
+              type: 'audio',
+              quality: 'best',
+            });
+            if (!format) {
+              const audioFormats = (
+                info.streaming_data?.adaptive_formats || []
+              ).filter((f) => f.mime_type?.includes('audio'));
+              if (audioFormats.length > 0) {
+                format = audioFormats[0];
+              }
+            }
+            if (format) {
+              (format as any)._chosenClient = `visitor_${client}`;
+              (format as any)._innertube = visitorYt;
+              return format;
+            } else {
+              errors[`visitor_${client}`] =
+                'streaming_data present but no audio format found';
+            }
+          } else {
+            errors[`visitor_${client}`] =
+              `no streaming_data (status=${info.playability_status?.status}, reason=${info.playability_status?.reason})`;
+          }
+        } catch (err: any) {
+          errors[`visitor_${client}`] = err?.message || String(err);
+        }
+      }
+    } catch (err) {
+      console.warn('Fallo intento visitor_data de stream:', err);
+    }
+
+    // 2. Fallback autenticado con cookies directas (YTMUSIC / WEB)
     try {
       const rawCookie = await this.usersService.findFirstYoutubeCookie();
       if (rawCookie) {
         const authedYt = await this.getAuthedInnertubeByCookie(rawCookie);
         if (authedYt) {
-          const authedClients = [
-            'VISIONOS',
-            'ANDROID_VR',
-            'IOS',
-            'YTMUSIC',
-            'WEB',
-          ];
+          const authedClients = ['YTMUSIC', 'WEB'];
           for (const client of authedClients) {
             try {
               const info = await authedYt.getBasicInfo(cleanId, {
@@ -783,7 +841,7 @@ export class YoutubeService implements OnModuleInit {
       console.warn('Fallo intento autenticado de stream:', err);
     }
 
-    // 2. Fallback sin cookies utilizando clientes modernos (útil en local donde no hay restricción de IP de datacenter)
+    // 3. Fallback sin cookies utilizando cliente por defecto
     const yt = await this.ensureInnertube();
     const clients: (string | undefined)[] = [
       'VISIONOS',

@@ -83,7 +83,9 @@ export class YoutubeController {
       const player =
         (format as any)._innertube?.session?.player ||
         this.youtubeService.yt?.session?.player;
-      const url = await format.decipher(player);
+      const url =
+        format.url ??
+        (await format.decipher(player));
       const cpn = Utils.generateRandomString(16);
 
       const headers: Record<string, string> = {
