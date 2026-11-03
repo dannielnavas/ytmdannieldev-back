@@ -128,7 +128,11 @@ describe('LikesService', () => {
       };
       mockUserLikeRepo.createQueryBuilder.mockReturnValue(qbMock);
 
-      const res = await service.getUserLikedTracks(1, { page: 1, limit: 10, search: 'Song' });
+      const res = await service.getUserLikedTracks(1, {
+        page: 1,
+        limit: 10,
+        search: 'Song',
+      });
       expect(res).toHaveProperty('data');
       expect(res).toHaveProperty('meta');
       expect((res as any).meta.total).toBe(1);
