@@ -96,6 +96,8 @@ export class YoutubeController {
       };
       if ((req.headers as any)?.['range']) {
         headers['Range'] = (req.headers as any)['range'] as string;
+      } else {
+        headers['Range'] = 'bytes=0-1048575';
       }
 
       const upstream = await fetch(`${url}&cpn=${cpn}`, { headers });
@@ -109,6 +111,7 @@ export class YoutubeController {
           statusCode: upstream.status || 502,
           message: 'Upstream audio fetch error',
           client: chosenClient,
+          step1Errors: (format as any)?._errors,
           upstreamBody: upstreamText.slice(0, 500),
         });
         return;

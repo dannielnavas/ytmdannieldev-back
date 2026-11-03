@@ -822,6 +822,7 @@ export class YoutubeService implements OnModuleInit {
                 if (format) {
                   (format as any)._chosenClient = `authed_${client}`;
                   (format as any)._innertube = authedYt;
+                  (format as any)._errors = errors;
                   return format;
                 } else {
                   errors[`authed_${client}`] =
