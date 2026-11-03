@@ -106,6 +106,7 @@ export class YoutubeController {
           statusCode: upstream.status,
           message: 'Upstream audio fetch error',
           client: chosenClient,
+          step1Errors: (format as any)?._step1Errors,
           upstreamBody: upstreamText.slice(0, 500),
           headersSent: headers,
         });

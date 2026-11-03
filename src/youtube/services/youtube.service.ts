@@ -785,6 +785,7 @@ export class YoutubeService implements OnModuleInit {
                 if (format) {
                   this.yt = authedYt;
                   (format as any)._chosenClient = `authed_${client}`;
+                  (format as any)._step1Errors = errors;
                   return format;
                 }
               }
