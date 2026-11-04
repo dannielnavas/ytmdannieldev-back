@@ -94,11 +94,50 @@ export class YoutubeController {
         referer: 'https://www.youtube.com',
         DNT: '?1',
       };
-      if ((req.headers as any)?.['range']) {
-        headers['Range'] = (req.headers as any)['range'] as string;
-      } else {
-        headers['Range'] = 'bytes=0-1048575';
+      const reqRange = (req.headers as any)?.['range'] as string | undefined;
+      let start = 0;
+      let end: number | undefined;
+
+      if (reqRange && reqRange.startsWith('bytes=')) {
+        const parts = reqRange.replace('bytes=', '').split('-');
+        const parsedStart = parseInt(parts[0], 10);
+        if (!isNaN(parsedStart)) {
+          start = parsedStart;
+        }
+        if (parts[1] && parts[1].trim() !== '') {
+          const parsedEnd = parseInt(parts[1], 10);
+          if (!isNaN(parsedEnd)) {
+            end = parsedEnd;
+          }
+        }
       }
+
+      const chunkSize = 1048576; // 1 MB chunk (Google Video maximum chunk size for web/YTMUSIC clients)
+      const totalLength = format.content_length
+        ? Number(format.content_length)
+        : undefined;
+
+      if (totalLength && start >= totalLength) {
+        res
+          .status(416)
+          .setHeader('Content-Range', `bytes */${totalLength}`)
+          .end();
+        return;
+      }
+
+      // Google Video returns 403 Forbidden if Range is open-ended (e.g. 'bytes=0-') or chunk exceeds ~1MB.
+      // If client explicitly requested an end within 1MB chunk, respect it.
+      // Otherwise, cap to start + chunkSize - 1 (or totalLength - 1 if smaller).
+      let boundedEnd: number;
+      if (end !== undefined && end >= start && end - start < chunkSize) {
+        boundedEnd = end;
+      } else if (totalLength && totalLength > 0) {
+        boundedEnd = Math.min(start + chunkSize - 1, totalLength - 1);
+      } else {
+        boundedEnd = start + chunkSize - 1;
+      }
+
+      headers['Range'] = `bytes=${start}-${boundedEnd}`;
 
       const upstream = await fetch(`${url}&cpn=${cpn}`, { headers });
       if (!upstream.ok && upstream.status !== 206) {
@@ -136,7 +175,13 @@ export class YoutubeController {
         return;
       }
 
-      Readable.fromWeb(upstream.body as any).pipe(res);
+      const bodyStream = Readable.fromWeb(upstream.body as any);
+      bodyStream.on('error', (err) => {
+        if (!res.writableEnded) {
+          res.destroy(err);
+        }
+      });
+      bodyStream.pipe(res);
     } catch (error) {
       console.error('Error streaming audio:', error);
       if (!res.headersSent) {
