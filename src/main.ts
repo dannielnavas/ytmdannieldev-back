@@ -149,6 +149,11 @@ export async function createNestServer(): Promise<NestExpressApplication> {
   return app;
 }
 
+// Configuración para Vercel Serverless Function
+export const config = {
+  maxDuration: 60,
+};
+
 // Handler para Vercel Serverless Functions
 export default async function handler(req: any, res: any) {
   const origin = req.headers?.origin;
