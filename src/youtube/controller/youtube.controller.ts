@@ -1,4 +1,3 @@
-import { Utils } from 'youtubei.js';
 import {
   Controller,
   Get,
@@ -9,7 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Request } from 'express';
-import { Readable } from 'node:stream';
+import { createReadStream } from 'node:fs';
 import { JwtAuthGuard } from '../../auth/guard/jwt-auth/jwt-auth.guard.js';
 import { Public } from '../../auth/decorators/public.decorator.js';
 import { ApiTags } from '@nestjs/swagger';
@@ -46,13 +45,15 @@ export class YoutubeController {
     @Req() req: Request,
     @Res() res: any,
   ) {
-    const id = (videoId || queryId)?.replace(/^RDAM(?:VM|PL)/, '');
+    const id = (videoId || queryId)?.trim();
     if (!id) {
       res.status(400).send('videoId is required');
       return;
     }
 
     // Si el cliente solicita JSON (ej. HttpClient de Angular desde _dashboard.stream)
+    // Nota: el <audio> del frontend nunca pide application/json; en ese caso
+    // servimos bytes con Range (contrato /youtube/stream/:videoId).
     const acceptHeader = (req.headers as any)?.['accept'] || '';
     if (acceptHeader.includes('application/json')) {
       const skipSegments = await this.youtubeService.getSkipSegments(id);
@@ -64,7 +65,7 @@ export class YoutubeController {
       return;
     }
 
-    return this.pipeAudioStream(id.replace(/^RDAM(?:VM|PL)/, ''), req, res);
+    return this.streamFile(id, req, res);
   }
 
   @Public()
@@ -74,115 +75,104 @@ export class YoutubeController {
     @Req() req: Request,
     @Res() res: any,
   ) {
-    return this.pipeAudioStream(id, req, res);
+    return this.streamFile(id, req, res);
   }
 
-  private async pipeAudioStream(id: string, req: Request, res: any) {
+  /**
+   * Contract (verified in playback.service.ts + electron/main.ts):
+   * - GET /youtube/stream/:videoId, no Authorization (audio tag cannot send
+   *   headers; endpoint is @Public).
+   * - Headers: Accept-Ranges: bytes, Content-Type: audio/mp4,
+   *   Access-Control-Allow-Origin: *, Access-Control-Expose-Headers:
+   *   Content-Range, Content-Length, Accept-Ranges.
+   * - Range bytes=s-e -> 206 + Content-Range: bytes s-e/total.
+   * - No Range -> 200 with Content-Length = total.
+   * - Out of range -> 416 + Content-Range: bytes ASTERISK/total.
+   *   (star-slash form: bytes STAR/total — written without the star to
+   *   avoid closing this JSDoc early.)
+   * - Bytes are served from a cached file (tmp cache dir, .m4a) so repeated
+   *   seeks do not re-transcode.
+   */
+  private async streamFile(id: string, req: Request, res: any) {
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Type', 'audio/mp4');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader(
+      'Access-Control-Expose-Headers',
+      'Content-Range, Content-Length, Accept-Ranges',
+    );
+
+    const abort = new AbortController();
+    const onClose = () => {
+      if (!res.writableEnded) {
+        abort.abort();
+      }
+    };
+    req.on('close', onClose);
+
     try {
-      const format = await this.youtubeService.getAudioStream(id);
-      const player =
-        (format as any)._innertube?.session?.player ||
-        this.youtubeService.yt?.session?.player;
-      const url =
-        format.url ??
-        (await format.decipher(player));
-      const cpn = Utils.generateRandomString(16);
+      const file = await this.youtubeService.getAudioFile(id, {
+        signal: abort.signal,
+      });
+      // Download finished: the close handler must no longer abort anything.
+      req.off('close', onClose);
 
-      const headers: Record<string, string> = {
-        accept: '*/*',
-        origin: 'https://www.youtube.com',
-        referer: 'https://www.youtube.com',
-        DNT: '?1',
-      };
-      const reqRange = (req.headers as any)?.['range'] as string | undefined;
-      let start = 0;
-      let end: number | undefined;
+      const size = file.size;
+      const range = (req.headers as any)?.['range'] as string | undefined;
 
-      if (reqRange && reqRange.startsWith('bytes=')) {
-        const parts = reqRange.replace('bytes=', '').split('-');
-        const parsedStart = parseInt(parts[0], 10);
-        if (!isNaN(parsedStart)) {
-          start = parsedStart;
-        }
-        if (parts[1] && parts[1].trim() !== '') {
-          const parsedEnd = parseInt(parts[1], 10);
-          if (!isNaN(parsedEnd)) {
-            end = parsedEnd;
+      if (!range) {
+        res.status(200);
+        res.setHeader('Content-Length', size);
+        const rs = createReadStream(file.path);
+        rs.on('error', (err: any) => {
+          if (!res.headersSent && !res.writableEnded) {
+            res.status(500).json({
+              statusCode: 500,
+              message: 'Error streaming audio',
+              error: err?.message || String(err),
+            });
+          } else if (!res.writableEnded) {
+            res.destroy(err);
           }
-        }
-      }
-
-      const chunkSize = 1048576; // 1 MB chunk (Google Video maximum chunk size for web/YTMUSIC clients)
-      const totalLength = format.content_length
-        ? Number(format.content_length)
-        : undefined;
-
-      if (totalLength && start >= totalLength) {
-        res
-          .status(416)
-          .setHeader('Content-Range', `bytes */${totalLength}`)
-          .end();
-        return;
-      }
-
-      // Google Video returns 403 Forbidden if Range is open-ended (e.g. 'bytes=0-') or chunk exceeds ~1MB.
-      // If client explicitly requested an end within 1MB chunk, respect it.
-      // Otherwise, cap to start + chunkSize - 1 (or totalLength - 1 if smaller).
-      let boundedEnd: number;
-      if (end !== undefined && end >= start && end - start < chunkSize) {
-        boundedEnd = end;
-      } else if (totalLength && totalLength > 0) {
-        boundedEnd = Math.min(start + chunkSize - 1, totalLength - 1);
-      } else {
-        boundedEnd = start + chunkSize - 1;
-      }
-
-      headers['Range'] = `bytes=${start}-${boundedEnd}`;
-
-      const upstream = await fetch(`${url}&cpn=${cpn}`, { headers });
-      if (!upstream.ok && upstream.status !== 206) {
-        const upstreamText = await upstream.text().catch(() => '');
-        const chosenClient = (format as any)?._chosenClient;
-        console.warn(
-          `Upstream audio fetch error for video ${id}: status=${upstream.status}, client=${chosenClient}, body=${upstreamText}`,
-        );
-        res.status(upstream.status || 502).json({
-          statusCode: upstream.status || 502,
-          message: 'Upstream audio fetch error',
-          client: chosenClient,
-          upstreamBody: upstreamText.slice(0, 500),
         });
+        res.on('close', () => {
+          if (!(rs as any).destroyed) (rs as any).destroy();
+        });
+        rs.pipe(res);
         return;
       }
 
-      res.status(upstream.status);
-      const contentType =
-        upstream.headers.get('content-type') || format.mime_type || 'audio/mp4';
-      res.setHeader('Content-Type', contentType);
-
-      const contentRange = upstream.headers.get('content-range');
-      if (contentRange) {
-        res.setHeader('Content-Range', contentRange);
-      }
-      const contentLength = upstream.headers.get('content-length');
-      if (contentLength) {
-        res.setHeader('Content-Length', contentLength);
-      }
-      res.setHeader('Accept-Ranges', 'bytes');
-
-      if (!upstream.body) {
-        res.status(502).end();
-        return;
+      const parsed = this.parseRange(range, size);
+      if (!parsed) {
+        res.status(416).setHeader('Content-Range', `bytes */${size}`);
+        return res.end();
       }
 
-      const bodyStream = Readable.fromWeb(upstream.body as any);
-      bodyStream.on('error', (err) => {
+      const { start, end } = parsed;
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+      res.setHeader('Content-Length', end - start + 1);
+
+      const rs = createReadStream(file.path, { start, end });
+      rs.on('error', (err: any) => {
         if (!res.writableEnded) {
           res.destroy(err);
         }
       });
-      bodyStream.pipe(res);
-    } catch (error) {
+      res.on('close', () => {
+        if (!(rs as any).destroyed) (rs as any).destroy();
+      });
+      rs.pipe(res);
+    } catch (error: any) {
+      req.off('close', onClose);
+      // Client disconnected during download (pause/seek abort) — nothing to do.
+      if (
+        error?.name === 'AbortError' ||
+        abort.signal.aborted ||
+        res.writableEnded
+      ) {
+        return;
+      }
       console.error('Error streaming audio:', error);
       if (!res.headersSent) {
         res.status(500).json({
@@ -192,6 +182,39 @@ export class YoutubeController {
         });
       }
     }
+  }
+
+  private parseRange(
+    range: string,
+    size: number,
+  ): { start: number; end: number } | null {
+    // Support: bytes=start-end, bytes=start-, bytes=-suffix.
+    const m = range.trim().match(/^bytes=(\d*)-(\d*)$/i);
+    if (!m) return null;
+    const [, startStr, endStr] = m;
+
+    if (startStr === '' && endStr === '') return null;
+
+    if (startStr === '') {
+      // Suffix range: last N bytes.
+      const suffix = Number(endStr);
+      if (Number.isNaN(suffix) || suffix <= 0) return null;
+      return { start: Math.max(0, size - suffix), end: size - 1 };
+    }
+
+    const start = Number(startStr);
+    if (Number.isNaN(start) || start >= size) return null;
+
+    let end: number;
+    if (endStr === '') {
+      end = size - 1;
+    } else {
+      end = Number(endStr);
+      if (Number.isNaN(end) || end < start) return null;
+      if (end >= size) end = size - 1;
+    }
+
+    return { start, end };
   }
 
   @Get('metadata/:id')

@@ -22,6 +22,13 @@ import axios from 'axios';
 import { Innertube, Misc, Platform, UniversalCache } from 'youtubei.js';
 import config from '../../config.js';
 import type { ConfigType } from '@nestjs/config';
+import { spawn } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
+import { mkdir, rename, stat, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 @Injectable()
 export class YoutubeService implements OnModuleInit {
@@ -41,6 +48,10 @@ export class YoutubeService implements OnModuleInit {
   >();
   private cachedVisitorData?: string;
   private visitorYt?: Innertube;
+  private readonly audioFileInflight = new Map<
+    string,
+    Promise<{ path: string; size: number }>
+  >();
 
   async onModuleInit() {
     Platform.shim.eval = async (data: any) => new Function(data.output)();
@@ -93,7 +104,10 @@ export class YoutubeService implements OnModuleInit {
     sections.forEach((sec, secIdx) => {
       if (Array.isArray(sec?.contents)) {
         sec.contents.forEach((item: any, itemIdx: number) => {
-          if (item && (item.type === 'SONG' || item.type === 'VIDEO' || item.videoId)) {
+          if (
+            item &&
+            (item.type === 'SONG' || item.type === 'VIDEO' || item.videoId)
+          ) {
             songRefs.push({ secIdx, itemIdx, song: item });
           }
         });
@@ -522,7 +536,8 @@ export class YoutubeService implements OnModuleInit {
         );
       }
 
-      const enrichedSections = await this.enrichDashboardSections(finalSections);
+      const enrichedSections =
+        await this.enrichDashboardSections(finalSections);
 
       // 6. Guardar en caché de base de datos y memoria
       const ttlHours = this.configService.youtubeCacheTtlHours || 6;
@@ -748,8 +763,347 @@ export class YoutubeService implements OnModuleInit {
     return { songs, playlists, artists, albums };
   }
 
+  private isPlayableVideoId(id: string): boolean {
+    return /^[a-zA-Z0-9_-]{11}$/.test(id);
+  }
+
+  private async getAudioCacheDir(): Promise<string> {
+    const dir =
+      process.env.AUDIO_CACHE_DIR?.trim() || join(tmpdir(), 'ytm-audio-cache');
+    await mkdir(dir, { recursive: true });
+    return dir;
+  }
+
+  private async resolveFfmpegBin(): Promise<string> {
+    const envPath = process.env.FFMPEG_PATH?.trim();
+    if (envPath) return envPath;
+    try {
+      // Optional: ffmpeg-static ships a static binary (useful on Vercel where
+      // the system `ffmpeg` is not available). It is an optional peer at
+      // runtime — do not fail the import if it is not installed.
+      const mod: any = await import('ffmpeg-static').catch(() => null);
+      const p = mod?.default || mod?.path || mod;
+      if (typeof p === 'string' && p) return p;
+    } catch {}
+    // Local dev / Fly / Render / VPS: system binary on PATH.
+    return 'ffmpeg';
+  }
+
+  /**
+   * Resolve an ID coming from the frontend to a playable 11-char videoId.
+   *
+   * The frontend contract expects a videoId for /youtube/stream/:videoId,
+   * but it sometimes sends album/playlist browse IDs such as
+   * `MPREb_wQnSna3KdkP` (album) or `RDAMVM...` / `RDAMPL...` (radios).
+   * Those IDs have no `streaming_data` and always return
+   * "This video is unavailable". Resolve them to the first track so the
+   * stream endpoint keeps working instead of returning a 500.
+   */
+  private async resolvePlayableVideoId(rawId: string): Promise<string> {
+    const normalized = (rawId || '').trim().replace(/^RDAM(?:VM|PL)/, '');
+    const id = normalized.startsWith('RDAMPL')
+      ? normalized.replace(/^RDAMPL/, '')
+      : normalized;
+
+    if (!id) {
+      throw new BadRequestException('videoId is required');
+    }
+
+    const isAlbum = id.startsWith('OLAK') || id.startsWith('MPREb');
+
+    if (this.isPlayableVideoId(id) && !isAlbum) {
+      return id;
+    }
+
+    // Radio shortcuts that embed a videoId: RD<videoId>, RDMM<videoId>
+    if (/^RDMM[a-zA-Z0-9_-]{11}$/.test(id)) {
+      return id.slice(4);
+    }
+    if (/^RD[a-zA-Z0-9_-]{11}$/.test(id)) {
+      return id.slice(2);
+    }
+
+    if (isAlbum) {
+      try {
+        const album: any = await this.ytmusic.getAlbum(id).catch(() => null);
+        const first = album?.songs?.find((s: any) => s?.videoId)?.videoId;
+        if (first) return first;
+      } catch {}
+      // Fall through to playlist-based resolution below.
+    }
+
+    // Playlist / album / mix: take the first playable item.
+    try {
+      const pl: any = await this.viewPlaylist(id).catch(() => null);
+      const first =
+        pl?.songsList?.find((s: any) => s?.videoId)?.videoId ||
+        pl?.songs?.find((s: any) => s?.videoId)?.videoId ||
+        pl?.infoPlaylist?.songsList?.[0]?.videoId;
+      if (first && this.isPlayableVideoId(first)) return first;
+    } catch {}
+
+    if (isAlbum) {
+      throw new NotFoundException(
+        `No playable track found for album ${id}; use GET /album/${id} and pass a videoId to /youtube/stream/:videoId`,
+      );
+    }
+
+    throw new NotFoundException(
+      `No playable videoId could be resolved from "${rawId}"; pass an 11-char videoId to /youtube/stream/:videoId`,
+    );
+  }
+
+  private async runFfmpegRemux(
+    ffmpegBin: string,
+    googleUrl: string,
+    tmpPath: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const args = ['-y', '-i', googleUrl, '-vn', '-c:a', 'copy', tmpPath];
+      const proc = spawn(ffmpegBin, args, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      proc.stderr?.on('data', (d: any) => {
+        stderr += String(d);
+      });
+      let settled = false;
+      const onAbort = () => {
+        if (!settled) {
+          try {
+            proc.kill('SIGTERM');
+          } catch {}
+        }
+      };
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+        } else {
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+      }
+      proc.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        reject(err);
+      });
+      proc.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        if (code === 0) {
+          resolve(undefined);
+        } else {
+          reject(
+            new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-500)}`),
+          );
+        }
+      });
+    });
+  }
+
+  private async runFfmpegAacFallback(
+    ffmpegBin: string,
+    googleUrl: string,
+    tmpPath: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const args = [
+        '-y',
+        '-i',
+        googleUrl,
+        '-vn',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        tmpPath,
+      ];
+      const proc = spawn(ffmpegBin, args, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      proc.stderr?.on('data', (d: any) => {
+        stderr += String(d);
+      });
+      let settled = false;
+      const onAbort = () => {
+        if (!settled) {
+          try {
+            proc.kill('SIGTERM');
+          } catch {}
+        }
+      };
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+        } else {
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+      }
+      proc.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        reject(err);
+      });
+      proc.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        if (code === 0) {
+          resolve(undefined);
+        } else {
+          reject(
+            new Error(
+              `ffmpeg (aac fallback) exited with code ${code}: ${stderr.slice(-500)}`,
+            ),
+          );
+        }
+      });
+    });
+  }
+
+  private async downloadRawToFile(
+    googleUrl: string,
+    tmpPath: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const res = await fetch(googleUrl, {
+      headers: {
+        accept: '*/*',
+        origin: 'https://www.youtube.com',
+        referer: 'https://www.youtube.com',
+      },
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      throw new Error(`Upstream fetch failed with status ${res.status}`);
+    }
+    await pipeline(
+      Readable.fromWeb(res.body as any),
+      createWriteStream(tmpPath),
+    );
+  }
+
+  /**
+   * Download + remux the audio ONCE per video to /tmp/<videoId>.m4a and
+   * return the cached file. Repeated seeks are served from this file by
+   * the controller (no re-transcode per seek).
+   *
+   * - Single-flight: concurrent requests for the same video share one
+   *   FFmpeg/download task.
+   * - Atomic write: FFmpeg writes to *.part, then renames on success.
+   * - Abort: if the client disconnects during download, FFmpeg is killed
+   *   (avoids EPIPE when pausing/seeking).
+   * - Fallbacks: FFmpeg copy → FFmpeg AAC → raw byte download. The raw
+   *   path keeps the endpoint working on hosts without an FFmpeg binary
+   *   (e.g. Vercel serverless); the file is still served as audio/mp4.
+   */
+  async getAudioFile(
+    videoId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<{ path: string; size: number }> {
+    const playableId = await this.resolvePlayableVideoId(videoId);
+    const safeId = playableId.replace(/[^A-Za-z0-9_-]/g, '');
+    if (!safeId) {
+      throw new BadRequestException('videoId is required');
+    }
+
+    const dir = await this.getAudioCacheDir();
+    const filePath = join(dir, `${safeId}.m4a`);
+
+    try {
+      const st = await stat(filePath);
+      if (st.size > 0) {
+        return { path: filePath, size: st.size };
+      }
+    } catch {}
+
+    const inflight = this.audioFileInflight.get(safeId);
+    if (inflight) {
+      return inflight;
+    }
+
+    const task = (async (): Promise<{ path: string; size: number }> => {
+      const signal = opts?.signal;
+      if (signal?.aborted) {
+        throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+      }
+
+      const format = await this.getAudioStream(playableId);
+      const player =
+        (format as any)._innertube?.session?.player ||
+        (this as any).yt?.session?.player;
+      const googleUrl =
+        (format as any).url ?? (await (format as any).decipher(player));
+
+      const partPath = `${filePath}.part-${process.pid}-${Date.now()}`;
+      let lastError: unknown;
+      try {
+        const ffmpegBin = await this.resolveFfmpegBin();
+        // 1. Remux without re-encode (fast).
+        try {
+          await this.runFfmpegRemux(ffmpegBin, googleUrl, partPath, signal);
+        } catch (err) {
+          lastError = err;
+          // Opus-in-MP4 copy can fail on some sources; try AAC encode once.
+          // If FFmpeg itself is missing (ENOENT), skip straight to raw.
+          const isFfmpegMissing =
+            (err as any)?.code === 'ENOENT' ||
+            String((err as any)?.message || '').includes('ENOENT');
+          if (!isFfmpegMissing) {
+            try {
+              await this.runFfmpegAacFallback(
+                ffmpegBin,
+                googleUrl,
+                partPath,
+                signal,
+              );
+            } catch (err2) {
+              lastError = err2;
+            }
+          }
+        }
+
+        if (lastError) {
+          // No usable FFmpeg (missing binary or both remux attempts failed):
+          // fall back to caching the raw bytes served by Google.
+          await this.downloadRawToFile(googleUrl, partPath, signal);
+        }
+
+        await rename(partPath, filePath);
+        const st = await stat(filePath);
+        if (!st.size) {
+          throw new InternalServerErrorException(
+            `Empty audio file for video ${playableId}`,
+          );
+        }
+        return { path: filePath, size: st.size };
+      } catch (err) {
+        await unlink(partPath).catch(() => undefined);
+        if (signal?.aborted || (err as any)?.name === 'AbortError') {
+          throw err;
+        }
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    })();
+
+    this.audioFileInflight.set(safeId, task);
+    try {
+      return await task;
+    } finally {
+      this.audioFileInflight.delete(safeId);
+    }
+  }
+
   async getAudioStream(videoId: string): Promise<Misc.Format> {
-    const cleanId = videoId.replace(/^RDAM(?:VM|PL)/, '');
+    const cleanId = videoId
+      .replace(/^RDAM(?:VM|PL)/, '')
+      .replace(/^RDAMPL/, '');
     const errors: Record<string, string> = {};
 
     // 1. Clientes móviles modernos (VISIONOS / ANDROID_VR / IOS) con visitor_data autenticado (sin SABR ni límite de 1MB)
@@ -1342,11 +1696,7 @@ export class YoutubeService implements OnModuleInit {
     return album;
   }
 
-  async getLyrics(
-    track_name: string,
-    artist_name: string,
-    duration?: number,
-  ) {
+  async getLyrics(track_name: string, artist_name: string, duration?: number) {
     if (!track_name) {
       throw new BadRequestException(`track_name is required`);
     }
