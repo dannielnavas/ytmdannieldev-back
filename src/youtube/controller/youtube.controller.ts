@@ -1,4 +1,5 @@
 import https from 'node:https';
+import type { Readable } from 'node:stream';
 import axios from 'axios';
 import {
   Controller,
@@ -100,6 +101,7 @@ export class YoutubeController {
     req: Request,
     res: Response,
   ) {
+    const reqStartMs = Date.now();
     const abort = new AbortController();
     const onClose = () => {
       if (!res.writableEnded) {
@@ -109,7 +111,10 @@ export class YoutubeController {
     req.on('close', onClose);
 
     try {
+      const resolveStartMs = Date.now();
       let streamInfo = await this.youtubeService.getResolvedStreamInfo(videoId);
+      const resolveMs = Date.now() - resolveStartMs;
+
       const effectiveRange =
         rangeHeader ?? ((req.headers as any)?.['range'] as string | undefined);
 
@@ -135,6 +140,7 @@ export class YoutubeController {
               return { outOfRange: true as const, start, end, total };
             }
             if (endStr && endStr.length > 0) {
+              // Respetar el end explícito solicitado por WKWebView (macOS) para evitar loops de reintentos
               const parsedEnd = parseInt(endStr, 10);
               end =
                 !Number.isNaN(parsedEnd) && parsedEnd >= start
@@ -142,9 +148,6 @@ export class YoutubeController {
                     ? Math.min(total - 1, parsedEnd)
                     : parsedEnd
                   : start + MAX_CHUNK_SIZE - 1;
-              if (end - start + 1 > MAX_CHUNK_SIZE) {
-                end = start + MAX_CHUNK_SIZE - 1;
-              }
             } else if (total > 0) {
               end = Math.min(total - 1, start + MAX_CHUNK_SIZE - 1);
             } else {
@@ -166,14 +169,14 @@ export class YoutubeController {
         return;
       }
 
-      const fetchChunkWithFailover = async (
+      const openStreamWithFailover = async (
         targetVideoId: string,
         baseUrl: string,
         start: number,
         end: number,
       ): Promise<{
         status: number;
-        buffer: Buffer;
+        stream: Readable | null;
         contentRange?: string;
         contentLength?: string;
       }> => {
@@ -183,14 +186,14 @@ export class YoutubeController {
 
         for (const candidateUrl of candidates) {
           try {
-            const response = await axios.get<ArrayBuffer>(candidateUrl, {
+            const response = await axios.get<Readable>(candidateUrl, {
               headers: {
                 Range: `bytes=${start}-${end}`,
                 'User-Agent': STREAM_USER_AGENT,
                 Origin: 'https://www.youtube.com',
                 Referer: 'https://www.youtube.com/',
               },
-              responseType: 'arraybuffer',
+              responseType: 'stream',
               httpsAgent: ipv4HttpsAgent,
               timeout: 4500,
               maxRedirects: 5,
@@ -200,9 +203,10 @@ export class YoutubeController {
             });
 
             if (response.status === 401 || response.status === 403) {
+              response.data?.destroy?.();
               return {
                 status: response.status,
-                buffer: Buffer.alloc(0),
+                stream: null,
               };
             }
 
@@ -215,7 +219,7 @@ export class YoutubeController {
 
             return {
               status: response.status,
-              buffer: Buffer.from(response.data),
+              stream: response.data,
               contentRange:
                 rawContentRange != null ? String(rawContentRange) : undefined,
               contentLength:
@@ -239,7 +243,8 @@ export class YoutubeController {
           : new Error('Failed to fetch stream chunk from all candidate hosts');
       };
 
-      let upstreamRes = await fetchChunkWithFailover(
+      const fetchStartMs = Date.now();
+      let upstreamRes = await openStreamWithFailover(
         streamInfo.videoId,
         streamInfo.url,
         rangeBounds.start,
@@ -254,7 +259,7 @@ export class YoutubeController {
           true,
         );
         rangeBounds = computeRange(streamInfo.contentLength);
-        upstreamRes = await fetchChunkWithFailover(
+        upstreamRes = await openStreamWithFailover(
           streamInfo.videoId,
           streamInfo.url,
           rangeBounds.start,
@@ -262,6 +267,7 @@ export class YoutubeController {
         );
       }
 
+      const upstreamTtfbMs = Date.now() - fetchStartMs;
       const upstreamContentRange = upstreamRes.contentRange;
       if (upstreamContentRange && !streamInfo.contentLength) {
         const totalMatch = upstreamContentRange.match(/\/(\d+)$/);
@@ -277,21 +283,20 @@ export class YoutubeController {
         }
       }
 
-      const buffer = upstreamRes.buffer;
-      req.off('close', onClose);
-
       const total = streamInfo.contentLength;
-      const actualEnd =
-        buffer.byteLength > 0
-          ? rangeBounds.start + buffer.byteLength - 1
-          : rangeBounds.end;
+      const expectedLength = rangeBounds.end - rangeBounds.start + 1;
       const contentRange =
         upstreamContentRange ||
         (total > 0
-          ? `bytes ${rangeBounds.start}-${actualEnd}/${total}`
+          ? `bytes ${rangeBounds.start}-${rangeBounds.end}/${total}`
           : undefined);
       const contentLength =
-        String(buffer.byteLength) || upstreamRes.contentLength || undefined;
+        upstreamRes.contentLength ||
+        (expectedLength > 0 ? String(expectedLength) : undefined);
+
+      console.log(
+        `[Stream Perf] videoId=${streamInfo.videoId} range=${effectiveRange || 'none'} resolveMs=${resolveMs}ms upstreamTtfbMs=${upstreamTtfbMs}ms totalTtfbMs=${Date.now() - reqStartMs}ms contentRange=${contentRange || '-'}`,
+      );
 
       res.status(206);
       res.setHeader('Content-Type', streamInfo.mimeType);
@@ -300,7 +305,26 @@ export class YoutubeController {
       if (contentRange) res.setHeader('Content-Range', contentRange);
       if (contentLength) res.setHeader('Content-Length', contentLength);
 
-      res.end(buffer);
+      const stream = upstreamRes.stream;
+      if (!stream) {
+        req.off('close', onClose);
+        res.end();
+        return;
+      }
+
+      stream.on('error', (err: any) => {
+        if (!res.writableEnded) {
+          res.destroy(err);
+        }
+      });
+      res.on('close', () => {
+        req.off('close', onClose);
+        if (!stream.destroyed) {
+          stream.destroy();
+        }
+      });
+
+      stream.pipe(res);
     } catch (error: any) {
       req.off('close', onClose);
       if (

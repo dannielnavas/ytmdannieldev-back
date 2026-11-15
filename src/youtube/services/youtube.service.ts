@@ -1419,8 +1419,13 @@ export class YoutubeService implements OnModuleInit {
   }
 
   async getMetadata(videoId: string) {
+    const infoPromise =
+      typeof (this.yt as any)?.getBasicInfo === 'function'
+        ? this.yt.getBasicInfo(videoId)
+        : this.yt.getInfo(videoId);
+
     const [info, skipSegments] = await Promise.all([
-      this.yt.getInfo(videoId),
+      infoPromise,
       this.getSkipSegments(videoId),
     ]);
 
