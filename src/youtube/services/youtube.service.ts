@@ -18,6 +18,7 @@ import type { SponsorBlockSegment } from '../../sponsorblock/interfaces/sponsorb
 import YTMusic from 'ytmusic-api';
 
 import crypto from 'crypto';
+import dns from 'node:dns';
 import axios from 'axios';
 import { Innertube, Misc, Platform, UniversalCache } from 'youtubei.js';
 import config from '../../config.js';
@@ -68,6 +69,7 @@ export class YoutubeService implements OnModuleInit {
   >();
 
   async onModuleInit() {
+    dns.setDefaultResultOrder('ipv4first');
     Platform.shim.eval = async (data: any) => new Function(data.output)();
     await this.ytmusic.initialize(); // solo una vez
     this.yt = await Innertube.create({
@@ -1164,6 +1166,54 @@ export class YoutubeService implements OnModuleInit {
     if (cached && cached.contentLength !== contentLength) {
       cached.contentLength = contentLength;
     }
+  }
+
+  updateStreamUrl(videoId: string, url: string): void {
+    if (!url) return;
+    const cached = this.streamCache.get(videoId);
+    if (cached && cached.url !== url) {
+      cached.url = url;
+    }
+  }
+
+  buildCandidateStreamUrls(rawUrl: string): string[] {
+    const candidates: string[] = [rawUrl];
+    try {
+      const parsed = new URL(rawUrl);
+      if (!parsed.hostname.endsWith('.googlevideo.com')) {
+        return candidates;
+      }
+
+      const mnParam = parsed.searchParams.get('mn') || '';
+      const mnNodes = mnParam
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.startsWith('sn-'));
+
+      const prefixMatch = parsed.hostname.match(/^(rr\d+---)/);
+      const rrPrefix = prefixMatch ? prefixMatch[1] : 'rr1---';
+
+      for (const sn of mnNodes) {
+        for (const prefix of ['rr1---', rrPrefix]) {
+          const altHost = `${prefix}${sn}.googlevideo.com`;
+          if (altHost !== parsed.hostname) {
+            const altUrl = new URL(rawUrl);
+            altUrl.hostname = altHost;
+            const str = altUrl.toString();
+            if (!candidates.includes(str)) {
+              candidates.push(str);
+            }
+          }
+        }
+      }
+
+      if (parsed.hostname !== 'redirector.googlevideo.com') {
+        const redirUrl = new URL(rawUrl);
+        redirUrl.hostname = 'redirector.googlevideo.com';
+        candidates.push(redirUrl.toString());
+      }
+    } catch {}
+    return candidates;
   }
 
   async getResolvedStreamInfo(

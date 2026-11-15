@@ -620,5 +620,23 @@ describe('YoutubeService', () => {
       expect(second).toEqual(first);
       expect(getAudioStreamSpy).toHaveBeenCalledTimes(1);
     });
+
+    it('should generate fallback Googlevideo hosts from mn query parameter in buildCandidateStreamUrls', () => {
+      const rawUrl =
+        'https://rr3---sn-4pcxgf5t-w0ws.googlevideo.com/videoplayback?itag=140&mn=sn-4pcxgf5t-w0ws,sn-q4fl6n6r';
+      const candidates = service.buildCandidateStreamUrls(rawUrl);
+
+      expect(candidates[0]).toBe(rawUrl);
+      expect(
+        candidates.some((u) =>
+          u.startsWith('https://rr1---sn-q4fl6n6r.googlevideo.com/'),
+        ),
+      ).toBe(true);
+      expect(
+        candidates.some((u) =>
+          u.startsWith('https://redirector.googlevideo.com/'),
+        ),
+      ).toBe(true);
+    });
   });
 });

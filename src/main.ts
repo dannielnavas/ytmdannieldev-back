@@ -1,3 +1,4 @@
+import dns from 'node:dns';
 import { NestFactory, Reflector } from '@nestjs/core';
 import { AppModule } from './app.module.js';
 import { ClassSerializerInterceptor, ValidationPipe } from '@nestjs/common';
@@ -5,6 +6,10 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { join } from 'path';
 import { existsSync } from 'fs';
+
+// Forzar IPv4 primero para evitar timeouts (UND_ERR_CONNECT_TIMEOUT) hacia *.googlevideo.com
+// cuando la red local o el ISP anuncia rutas IPv6 sin salida real.
+dns.setDefaultResultOrder('ipv4first');
 
 let server: ((req: any, res: any) => void) | null = null;
 

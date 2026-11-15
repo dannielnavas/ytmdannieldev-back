@@ -1,3 +1,5 @@
+import https from 'node:https';
+import axios from 'axios';
 import {
   Controller,
   Get,
@@ -18,6 +20,14 @@ import { YoutubeService } from '../services/youtube.service.js';
 const MAX_CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB
 const STREAM_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+// Forzar IPv4 (family: 4) hacia *.googlevideo.com para evitar UND_ERR_CONNECT_TIMEOUT
+// cuando la red anuncia IPv6 sin conectividad real hacia los nodos GGC del ISP.
+const ipv4HttpsAgent = new https.Agent({
+  family: 4,
+  keepAlive: true,
+  timeout: 4000,
+});
 
 @ApiTags('Youtube')
 @Controller('youtube')
@@ -156,16 +166,81 @@ export class YoutubeController {
         return;
       }
 
-      const fetchChunk = (url: string, start: number, end: number) =>
-        fetch(url, {
-          headers: {
-            Range: `bytes=${start}-${end}`,
-            'User-Agent': STREAM_USER_AGENT,
-          },
-          signal: abort.signal,
-        });
+      const fetchChunkWithFailover = async (
+        targetVideoId: string,
+        baseUrl: string,
+        start: number,
+        end: number,
+      ): Promise<{
+        status: number;
+        buffer: Buffer;
+        contentRange?: string;
+        contentLength?: string;
+      }> => {
+        const candidates =
+          this.youtubeService.buildCandidateStreamUrls(baseUrl);
+        let lastError: unknown;
 
-      let upstreamRes = await fetchChunk(
+        for (const candidateUrl of candidates) {
+          try {
+            const response = await axios.get<ArrayBuffer>(candidateUrl, {
+              headers: {
+                Range: `bytes=${start}-${end}`,
+                'User-Agent': STREAM_USER_AGENT,
+                Origin: 'https://www.youtube.com',
+                Referer: 'https://www.youtube.com/',
+              },
+              responseType: 'arraybuffer',
+              httpsAgent: ipv4HttpsAgent,
+              timeout: 4500,
+              maxRedirects: 5,
+              signal: abort.signal,
+              validateStatus: (s) =>
+                (s >= 200 && s < 300) || s === 401 || s === 403,
+            });
+
+            if (response.status === 401 || response.status === 403) {
+              return {
+                status: response.status,
+                buffer: Buffer.alloc(0),
+              };
+            }
+
+            if (candidateUrl !== baseUrl) {
+              this.youtubeService.updateStreamUrl(targetVideoId, candidateUrl);
+            }
+
+            const rawContentRange = response.headers['content-range'];
+            const rawContentLength = response.headers['content-length'];
+
+            return {
+              status: response.status,
+              buffer: Buffer.from(response.data),
+              contentRange:
+                rawContentRange != null ? String(rawContentRange) : undefined,
+              contentLength:
+                rawContentLength != null ? String(rawContentLength) : undefined,
+            };
+          } catch (err: any) {
+            if (
+              abort.signal.aborted ||
+              err?.name === 'AbortError' ||
+              err?.name === 'CanceledError' ||
+              err?.code === 'ERR_CANCELED'
+            ) {
+              throw err;
+            }
+            lastError = err;
+          }
+        }
+
+        throw lastError instanceof Error
+          ? lastError
+          : new Error('Failed to fetch stream chunk from all candidate hosts');
+      };
+
+      let upstreamRes = await fetchChunkWithFailover(
+        streamInfo.videoId,
         streamInfo.url,
         rangeBounds.start,
         rangeBounds.end,
@@ -179,14 +254,15 @@ export class YoutubeController {
           true,
         );
         rangeBounds = computeRange(streamInfo.contentLength);
-        upstreamRes = await fetchChunk(
+        upstreamRes = await fetchChunkWithFailover(
+          streamInfo.videoId,
           streamInfo.url,
           rangeBounds.start,
           rangeBounds.end,
         );
       }
 
-      const upstreamContentRange = upstreamRes.headers.get('content-range');
+      const upstreamContentRange = upstreamRes.contentRange;
       if (upstreamContentRange && !streamInfo.contentLength) {
         const totalMatch = upstreamContentRange.match(/\/(\d+)$/);
         if (totalMatch) {
@@ -201,7 +277,7 @@ export class YoutubeController {
         }
       }
 
-      const buffer = Buffer.from(await upstreamRes.arrayBuffer());
+      const buffer = upstreamRes.buffer;
       req.off('close', onClose);
 
       const total = streamInfo.contentLength;
@@ -215,9 +291,7 @@ export class YoutubeController {
           ? `bytes ${rangeBounds.start}-${actualEnd}/${total}`
           : undefined);
       const contentLength =
-        String(buffer.byteLength) ||
-        upstreamRes.headers.get('content-length') ||
-        undefined;
+        String(buffer.byteLength) || upstreamRes.contentLength || undefined;
 
       res.status(206);
       res.setHeader('Content-Type', streamInfo.mimeType);
@@ -231,6 +305,8 @@ export class YoutubeController {
       req.off('close', onClose);
       if (
         error?.name === 'AbortError' ||
+        error?.name === 'CanceledError' ||
+        error?.code === 'ERR_CANCELED' ||
         abort.signal.aborted ||
         res.writableEnded
       ) {
