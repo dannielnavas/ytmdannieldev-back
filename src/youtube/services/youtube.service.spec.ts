@@ -570,4 +570,55 @@ describe('YoutubeService', () => {
       expect(albumRes.songs[0].skipSegments).toEqual(mockSegments);
     });
   });
+
+  describe('Stream resolution and caching', () => {
+    it('should prioritize audio/mp4 (itag 140) over audio/webm in getAudioStream', async () => {
+      const webmFormat = {
+        itag: 251,
+        mime_type: 'audio/webm; codecs="opus"',
+        url: 'https://rr1---sn.googlevideo.com/videoplayback?itag=251',
+        content_length: 4100000,
+      };
+      const mp4Format = {
+        itag: 140,
+        mime_type: 'audio/mp4; codecs="mp4a.40.2"',
+        url: 'https://rr1---sn.googlevideo.com/videoplayback?itag=140',
+        content_length: 3500000,
+      };
+
+      (service as any).visitorYt = {
+        getBasicInfo: vi.fn().mockResolvedValue({
+          streaming_data: {
+            adaptive_formats: [webmFormat, mp4Format],
+          },
+          chooseFormat: vi.fn().mockReturnValue(webmFormat),
+        }),
+      };
+
+      const chosen = await service.getAudioStream('dQw4w9WgXcQ');
+      expect(chosen.itag).toBe(140);
+      expect(chosen.mime_type).toContain('audio/mp4');
+    });
+
+    it('should cache resolved stream info for 10 minutes in getResolvedStreamInfo', async () => {
+      const getAudioStreamSpy = vi
+        .spyOn(service, 'getAudioStream')
+        .mockResolvedValue({
+          itag: 140,
+          mime_type: 'audio/mp4; codecs="mp4a.40.2"',
+          url: 'https://rr1---sn.googlevideo.com/videoplayback?itag=140&clen=3456789',
+          content_length: 3456789,
+        } as any);
+
+      const first = await service.getResolvedStreamInfo('dQw4w9WgXcQ');
+      expect(first.mimeType).toBe('audio/mp4');
+      expect(first.contentLength).toBe(3456789);
+      expect(first.url).toContain('itag=140');
+      expect(getAudioStreamSpy).toHaveBeenCalledTimes(1);
+
+      const second = await service.getResolvedStreamInfo('dQw4w9WgXcQ');
+      expect(second).toEqual(first);
+      expect(getAudioStreamSpy).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -17,6 +17,9 @@ export async function createNestServer(): Promise<NestExpressApplication> {
     'http://127.0.0.1:4200',
     'http://localhost:3000',
     'http://127.0.0.1:3000',
+    'tauri://localhost',
+    'http://tauri.localhost',
+    'https://tauri.localhost',
   ];
 
   // Configuración CORS para orígenes específicos
@@ -41,6 +44,7 @@ export async function createNestServer(): Promise<NestExpressApplication> {
     allowedHeaders: [
       'Content-Type',
       'Authorization',
+      'Range',
       'X-Requested-With',
       'Accept',
       'Origin',
@@ -56,6 +60,7 @@ export async function createNestServer(): Promise<NestExpressApplication> {
       'Accept-Ranges',
       'Content-Range',
       'Content-Length',
+      'Content-Type',
     ],
     credentials: true, // Ahora puede ser true con orígenes específicos
     preflightContinue: false,
@@ -78,7 +83,7 @@ export async function createNestServer(): Promise<NestExpressApplication> {
     );
     res.header(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-API-Key, Cache-Control, Pragma',
+      'Content-Type, Authorization, Range, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-API-Key, Cache-Control, Pragma',
     );
     res.header('Access-Control-Max-Age', '86400');
     res.header(
@@ -89,6 +94,7 @@ export async function createNestServer(): Promise<NestExpressApplication> {
         'Accept-Ranges',
         'Content-Range',
         'Content-Length',
+        'Content-Type',
       ].join(', '),
     );
 
@@ -169,12 +175,12 @@ export default async function handler(req: any, res: any) {
   );
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-API-Key, Cache-Control, Pragma',
+    'Content-Type, Authorization, Range, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-API-Key, Cache-Control, Pragma',
   );
   res.setHeader('Access-Control-Max-Age', '86400');
   res.setHeader(
     'Access-Control-Expose-Headers',
-    'Authorization, X-Total-Count, Accept-Ranges, Content-Range, Content-Length',
+    'Authorization, X-Total-Count, Accept-Ranges, Content-Range, Content-Length, Content-Type',
   );
 
   // Responder de inmediato a OPTIONS preflight

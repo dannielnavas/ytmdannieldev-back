@@ -30,6 +30,15 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
+export interface CachedStreamInfo {
+  videoId: string;
+  url: string;
+  mimeType: string;
+  contentLength: number;
+  itag?: number;
+  expiresAt: number;
+}
+
 @Injectable()
 export class YoutubeService implements OnModuleInit {
   private ytmusic = new YTMusic();
@@ -51,6 +60,11 @@ export class YoutubeService implements OnModuleInit {
   private readonly audioFileInflight = new Map<
     string,
     Promise<{ path: string; size: number }>
+  >();
+  private readonly streamCache = new Map<string, CachedStreamInfo>();
+  private readonly streamInfoInflight = new Map<
+    string,
+    Promise<CachedStreamInfo>
   >();
 
   async onModuleInit() {
@@ -1100,6 +1114,146 @@ export class YoutubeService implements OnModuleInit {
     }
   }
 
+  private chooseBestAudioFormat(info: any): Misc.Format | undefined {
+    const adaptive: any[] = info?.streaming_data?.adaptive_formats || [];
+    const formats: any[] = info?.streaming_data?.formats || [];
+    const allFormats = [...adaptive, ...formats];
+    const audioOnly = allFormats.filter((f) => {
+      const mime = String(f?.mime_type || f?.mimeType || '');
+      return (
+        mime.startsWith('audio/') ||
+        (mime.includes('audio') && !f?.has_video && !f?.hasVideo)
+      );
+    });
+
+    // 1. Priorizar audio/mp4 (itag 140) para compatibilidad total con WKWebView (macOS), WebView2 y Chromium
+    const itag140 =
+      audioOnly.find((f) => f?.itag === 140) ||
+      allFormats.find((f) => f?.itag === 140);
+    if (itag140) return itag140;
+
+    // 2. Cualquier otro formato de solo audio en contenedor audio/mp4
+    const mp4Format = audioOnly.find((f) =>
+      String(f?.mime_type || f?.mimeType || '').includes('audio/mp4'),
+    );
+    if (mp4Format) return mp4Format;
+
+    // 3. Fallback a chooseFormat de youtubei.js o el primer formato de audio disponible
+    if (typeof info?.chooseFormat === 'function') {
+      try {
+        const chosen = info.chooseFormat({
+          type: 'audio',
+          quality: 'best',
+        });
+        if (chosen) return chosen;
+      } catch {}
+    }
+
+    return audioOnly[0];
+  }
+
+  invalidateStreamCache(videoId: string): void {
+    const clean = (videoId || '').trim();
+    if (!clean) return;
+    this.streamCache.delete(clean);
+  }
+
+  updateStreamContentLength(videoId: string, contentLength: number): void {
+    if (!contentLength || contentLength <= 0) return;
+    const cached = this.streamCache.get(videoId);
+    if (cached && cached.contentLength !== contentLength) {
+      cached.contentLength = contentLength;
+    }
+  }
+
+  async getResolvedStreamInfo(
+    videoId: string,
+    forceRefresh = false,
+  ): Promise<CachedStreamInfo> {
+    const now = Date.now();
+    if (!forceRefresh) {
+      const directCached = this.streamCache.get(videoId);
+      if (directCached && directCached.expiresAt > now) {
+        return directCached;
+      }
+    }
+
+    const playableId = await this.resolvePlayableVideoId(videoId);
+    if (!forceRefresh) {
+      const cached = this.streamCache.get(playableId);
+      if (cached && cached.expiresAt > Date.now()) {
+        if (videoId !== playableId) {
+          this.streamCache.set(videoId, cached);
+        }
+        return cached;
+      }
+
+      const inflight = this.streamInfoInflight.get(playableId);
+      if (inflight) {
+        return inflight;
+      }
+    }
+
+    const task = (async (): Promise<CachedStreamInfo> => {
+      const bestFormat: any = await this.getAudioStream(playableId);
+      const player =
+        bestFormat?._innertube?.session?.player ||
+        (this as any).yt?.session?.player;
+      const url: string =
+        bestFormat?.url ??
+        (typeof bestFormat?.decipher === 'function'
+          ? await bestFormat.decipher(player)
+          : '');
+
+      if (!url) {
+        throw new InternalServerErrorException(
+          `Could not resolve stream URL for video ${playableId}`,
+        );
+      }
+
+      const rawMime =
+        bestFormat?.mime_type || bestFormat?.mimeType || 'audio/mp4';
+      const mimeType = String(rawMime).split(';')[0].trim() || 'audio/mp4';
+
+      let contentLength = Number(
+        bestFormat?.content_length ?? bestFormat?.contentLength ?? 0,
+      );
+      if (!contentLength || Number.isNaN(contentLength)) {
+        try {
+          const clenParam = new URL(url).searchParams.get('clen');
+          contentLength = clenParam ? Number(clenParam) : 0;
+        } catch {
+          contentLength = 0;
+        }
+      }
+
+      const resolved: CachedStreamInfo = {
+        videoId: playableId,
+        url,
+        mimeType,
+        contentLength:
+          Number.isFinite(contentLength) && contentLength > 0
+            ? contentLength
+            : 0,
+        itag: bestFormat?.itag,
+        expiresAt: Date.now() + 10 * 60 * 1000, // 10 min de caché
+      };
+
+      this.streamCache.set(playableId, resolved);
+      if (videoId !== playableId) {
+        this.streamCache.set(videoId, resolved);
+      }
+      return resolved;
+    })();
+
+    this.streamInfoInflight.set(playableId, task);
+    try {
+      return await task;
+    } finally {
+      this.streamInfoInflight.delete(playableId);
+    }
+  }
+
   async getAudioStream(videoId: string): Promise<Misc.Format> {
     const cleanId = videoId
       .replace(/^RDAM(?:VM|PL)/, '')
@@ -1116,18 +1270,7 @@ export class YoutubeService implements OnModuleInit {
             client,
           } as any);
           if (info.streaming_data) {
-            let format = info.chooseFormat({
-              type: 'audio',
-              quality: 'best',
-            });
-            if (!format) {
-              const audioFormats = (
-                info.streaming_data?.adaptive_formats || []
-              ).filter((f) => f.mime_type?.includes('audio'));
-              if (audioFormats.length > 0) {
-                format = audioFormats[0];
-              }
-            }
+            const format = this.chooseBestAudioFormat(info);
             if (format) {
               (format as any)._chosenClient = `visitor_${client}`;
               (format as any)._innertube = visitorYt;
@@ -1161,18 +1304,7 @@ export class YoutubeService implements OnModuleInit {
                 client,
               } as any);
               if (info.streaming_data) {
-                let format = info.chooseFormat({
-                  type: 'audio',
-                  quality: 'best',
-                });
-                if (!format) {
-                  const audioFormats = (
-                    info.streaming_data?.adaptive_formats || []
-                  ).filter((f) => f.mime_type?.includes('audio'));
-                  if (audioFormats.length > 0) {
-                    format = audioFormats[0];
-                  }
-                }
+                const format = this.chooseBestAudioFormat(info);
                 if (format) {
                   (format as any)._chosenClient = `authed_${client}`;
                   (format as any)._innertube = authedYt;
@@ -1213,15 +1345,7 @@ export class YoutubeService implements OnModuleInit {
         const opts: any = client ? { client } : {};
         const info = await yt.getBasicInfo(cleanId, opts);
         if (info.streaming_data) {
-          let format = info.chooseFormat({ type: 'audio', quality: 'best' });
-          if (!format) {
-            const audioFormats = (
-              info.streaming_data?.adaptive_formats || []
-            ).filter((f) => f.mime_type?.includes('audio'));
-            if (audioFormats.length > 0) {
-              format = audioFormats[0];
-            }
-          }
+          const format = this.chooseBestAudioFormat(info);
           if (format) {
             (format as any)._chosenClient = client || 'default';
             (format as any)._innertube = yt;
