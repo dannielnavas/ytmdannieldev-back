@@ -37,6 +37,7 @@ export interface CachedStreamInfo {
   mimeType: string;
   contentLength: number;
   itag?: number;
+  patchedHeader?: Buffer;
   expiresAt: number;
 }
 
@@ -1173,6 +1174,14 @@ export class YoutubeService implements OnModuleInit {
     const cached = this.streamCache.get(videoId);
     if (cached && cached.url !== url) {
       cached.url = url;
+    }
+  }
+
+  updateStreamPatchedHeader(videoId: string, header: Buffer): void {
+    if (!header?.length) return;
+    const cached = this.streamCache.get(videoId);
+    if (cached) {
+      cached.patchedHeader = header;
     }
   }
 

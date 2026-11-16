@@ -17,6 +17,10 @@ import { Public } from '../../auth/decorators/public.decorator.js';
 import { ApiTags } from '@nestjs/swagger';
 import { Token } from '../../auth/models/token.model.js';
 import { YoutubeService } from '../services/youtube.service.js';
+import {
+  createMp4HeaderPatchTransform,
+  patchFragmentedMp4Header,
+} from '../utils/mp4-duration-patch.js';
 
 const MAX_CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB
 const STREAM_USER_AGENT =
@@ -312,19 +316,91 @@ export class YoutubeController {
         return;
       }
 
-      stream.on('error', (err: any) => {
-        if (!res.writableEnded) {
-          res.destroy(err);
-        }
-      });
-      res.on('close', () => {
-        req.off('close', onClose);
-        if (!stream.destroyed) {
-          stream.destroy();
-        }
-      });
+      if (
+        streamInfo.mimeType.includes('mp4') &&
+        !streamInfo.patchedHeader &&
+        rangeBounds.start > 0 &&
+        rangeBounds.start < 65536
+      ) {
+        try {
+          const headRes = await openStreamWithFailover(
+            streamInfo.videoId,
+            streamInfo.url,
+            0,
+            4095,
+          );
+          if (headRes.stream) {
+            const headChunks: Buffer[] = [];
+            for await (const chunk of headRes.stream) {
+              headChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            }
+            const headBuf = Buffer.concat(headChunks);
+            const moovEnd = patchFragmentedMp4Header(headBuf);
+            if (moovEnd > 0) {
+              const header = Buffer.from(headBuf.subarray(0, moovEnd));
+              streamInfo.patchedHeader = header;
+              this.youtubeService.updateStreamPatchedHeader(
+                streamInfo.videoId,
+                header,
+              );
+            }
+          }
+        } catch {}
+      }
 
-      stream.pipe(res);
+      const shouldPatchMp4Header =
+        streamInfo.mimeType.includes('mp4') &&
+        (rangeBounds.start === 0 ||
+          (streamInfo.patchedHeader !== undefined &&
+            rangeBounds.start < streamInfo.patchedHeader.length));
+
+      if (shouldPatchMp4Header) {
+        const patchTransform = createMp4HeaderPatchTransform(
+          rangeBounds.start,
+          {
+            cachedHeader: streamInfo.patchedHeader,
+            onPatchedHeader: (header) => {
+              streamInfo.patchedHeader = header;
+              this.youtubeService.updateStreamPatchedHeader(
+                streamInfo.videoId,
+                header,
+              );
+            },
+          },
+        );
+        stream.on('error', (err: any) => {
+          patchTransform.destroy(err);
+        });
+        patchTransform.on('error', (err: any) => {
+          if (!res.writableEnded) {
+            res.destroy(err);
+          }
+        });
+        res.on('close', () => {
+          req.off('close', onClose);
+          if (!stream.destroyed) {
+            stream.destroy();
+          }
+          if (!patchTransform.destroyed) {
+            patchTransform.destroy();
+          }
+        });
+        stream.pipe(patchTransform).pipe(res);
+      } else {
+        stream.on('error', (err: any) => {
+          if (!res.writableEnded) {
+            res.destroy(err);
+          }
+        });
+        res.on('close', () => {
+          req.off('close', onClose);
+          if (!stream.destroyed) {
+            stream.destroy();
+          }
+        });
+
+        stream.pipe(res);
+      }
     } catch (error: any) {
       req.off('close', onClose);
       if (
